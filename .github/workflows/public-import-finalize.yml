@@ -1,0 +1,47 @@
+name: Temporary public import finalizer
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - synchronize
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.head_ref == 'public/initial-foundation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: public/initial-foundation
+          fetch-depth: 0
+
+      - name: Remove marker and regenerate manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .ci-sync ]]; then
+            echo 'Branch already finalized.'
+            exit 0
+          fi
+
+          rm -f .ci-sync FILE_MANIFEST.sha256
+          find . -path ./.git -prune -o -type f ! -name FILE_MANIFEST.sha256 -print0 \
+            | LC_ALL=C sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  \./#  #' > FILE_MANIFEST.sha256
+          sha256sum -c FILE_MANIFEST.sha256 >/dev/null
+
+          python3 tools/validate-dashboard.py
+          python3 tools/test-dashboard-regressions.py
+          for test in app/src/test/js/*.js; do node "$test" >/dev/null; done
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- FILE_MANIFEST.sha256 .ci-sync
+          git commit -m 'Finalize curated public source manifest'
+          git push origin HEAD:public/initial-foundation
