@@ -1,11 +1,6 @@
 name: Android quality
 
 on:
-  push:
-    branches:
-      - main
-      - "fix/**"
-      - "feature/**"
   pull_request:
   workflow_dispatch:
 
