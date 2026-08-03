@@ -6,17 +6,33 @@ Epic DashTune is an Android dashboard, diagnostics, logging, playback, and tunin
 
 This repository contains the curated public Android source, dashboard assets, validation tools, and automated tests. Experimental UX concepts remain in a separate project so prototypes are not mistaken for supported production behavior.
 
+## Official release candidate
+
+The first official release candidate is available as a GitHub pre-release:
+
+- Release: [Epic DashTune 0.11.12 RC1](https://github.com/PJawZK/Epic-DashTune_Public/releases/tag/v0.11.12-rc.1)
+- APK: [Epic-DashTune-0.11.12-rc.1.apk](https://github.com/PJawZK/Epic-DashTune_Public/releases/download/v0.11.12-rc.1/Epic-DashTune-0.11.12-rc.1.apk)
+- SHA-256 file: [Epic-DashTune-0.11.12-rc.1.apk.sha256](https://github.com/PJawZK/Epic-DashTune_Public/releases/download/v0.11.12-rc.1/Epic-DashTune-0.11.12-rc.1.apk.sha256)
+- Official verification report: [Epic-DashTune-0.11.12-rc.1-verification.txt](https://github.com/PJawZK/Epic-DashTune_Public/releases/download/v0.11.12-rc.1/Epic-DashTune-0.11.12-rc.1-verification.txt)
+- APK SHA-256: `8747d162b426ce94f517750fa37907512bdfaeba81baf12098850dc1e3a3c5c2`
+
+RC1 was verified with Android build-tools 34.0.0. APK Signature Scheme v2, the expected continuity signer, package/version identity, ZIP integrity, supported page-alignment checking, and controlled packaged-asset equality all passed.
+
+RC1 remains a pre-release until separately authorized physical acceptance on the target Samsung SM-T500 and EpicEFI Mega144H7 setup. The application remains strictly ECU read-only.
+
+See [the RC1 release record](docs/releases/v0.11.12-rc.1.md) for exact source, CI, signing, and acceptance provenance.
+
 ## Current source identity
 
 - Public product name: **Epic DashTune**
-- Legacy Android app label in the initial import: **EpicDash JZ**
+- Legacy Android app label in the initial import and RC1: **EpicDash JZ**
 - Android package retained for update continuity: `com.buttonbox.ble.jz`
 - Version: `0.11.12-stale1-jz` (`1114`)
 - Minimum Android: API 26
 - Compile/target SDK: API 34
 - ECU capability: strictly read-only
 
-The legacy package and app label are intentionally retained in this first public import. Renaming the installed application is a separate compatibility and release task.
+The legacy package and app label are intentionally retained in this first public import and RC1. Renaming the installed application is a separate compatibility and release task.
 
 ## Implemented capabilities
 
@@ -47,11 +63,13 @@ python3 tools/test-dashboard-regressions.py
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-See [docs/BUILDING.md](docs/BUILDING.md) for the complete setup and signing distinction.
+See [docs/BUILDING.md](docs/BUILDING.md) for the complete setup, signing distinction, and official-release verification guidance.
 
 ## Public-export provenance
 
-The initial source import was produced by an explicit allowlist from private development commit `6d705d5ae3078a2ade377c51e8fe10b680374f1a`. Private signing material, operational handoffs, assistant instructions, internal audit history, generated APKs, personal paths, raw vehicle logs, and sensitive diagnostics are not included.
+The initial source import was produced by an explicit allowlist from private development commit `6d705d5ae3078a2ade377c51e8fe10b680374f1a`. Private signing material, operational handoffs, assistant instructions, internal audit history, generated APKs, personal paths, raw vehicle logs, and sensitive diagnostics are not included in the public source tree.
+
+The official RC1 APK is distributed through GitHub Releases with its checksum and verification report. No signing key, signing properties, password, or private release payload is stored in this repository.
 
 See [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md) and [docs/PUBLIC_EXPORT_POLICY.md](docs/PUBLIC_EXPORT_POLICY.md).
 
