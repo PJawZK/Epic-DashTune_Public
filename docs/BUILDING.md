@@ -61,6 +61,37 @@ gradle assembleDebug
 
 Do not commit that properties file or its referenced keystore.
 
+## Official distributed RC1
+
+The canonical maintainer-distributed release candidate is available from [GitHub Release `v0.11.12-rc.1`](https://github.com/PJawZK/Epic-DashTune_Public/releases/tag/v0.11.12-rc.1).
+
+- APK: `Epic-DashTune-0.11.12-rc.1.apk`
+- SHA-256: `8747d162b426ce94f517750fa37907512bdfaeba81baf12098850dc1e3a3c5c2`
+- Package: `com.buttonbox.ble.jz`
+- Version: `0.11.12-stale1-jz` (`1114`)
+- Continuity signer certificate SHA-256: `d92dae5e61910fae171af41f615c00685e5e3e6909512f2a0429df0805db8f76`
+
+The GitHub Release also contains a checksum file and the complete official Android build-tools verification report.
+
+A locally assembled debug APK is not the official RC1, even when built from identical source. Do not re-sign, realign, recompress, or otherwise modify the released APK; any byte change invalidates its published SHA-256 and may invalidate update continuity.
+
+To verify a downloaded copy:
+
+```bash
+sha256sum -c Epic-DashTune-0.11.12-rc.1.apk.sha256
+$ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose --print-certs Epic-DashTune-0.11.12-rc.1.apk
+$ANDROID_HOME/build-tools/34.0.0/zipalign -c -p -v 4 Epic-DashTune-0.11.12-rc.1.apk
+unzip -t Epic-DashTune-0.11.12-rc.1.apk
+```
+
+Expected signature summary:
+
+- APK Signature Scheme v2: true
+- Number of signers: 1
+- Signer certificate SHA-256: `d92dae5e61910fae171af41f615c00685e5e3e6909512f2a0429df0805db8f76`
+
+RC1 remains a pre-release until the separately controlled physical acceptance procedure has passed.
+
 ## Validation reporting
 
 Report each command as passed, failed, unavailable, or not run. A missing SDK, unavailable dependency cache, or blocked network is an environment limitation—not a passed build.
