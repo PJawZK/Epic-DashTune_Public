@@ -1,3 +1,4 @@
+# Generated from the clean public PR tree; this manifest intentionally excludes itself.
 418feb825918ae9ba8f4d11694d7b95303baf1e667d04163d325b1e701b912b3  .github/workflows/android-quality.yml
 8097e5be16c853ad8a8e2ab4245c2194b66b7dfc6425930def8bb0dcce6f0256  .gitignore
 f1ebd9bfa161f29697a73340c4c7fca4d48e6ba1ce71ebf708783125421ab3a3  CONTRIBUTING.md
