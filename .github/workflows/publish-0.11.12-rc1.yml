@@ -10,7 +10,6 @@ on:
       - synchronize
 
 permissions:
-  actions: read
   contents: write
 
 jobs:
@@ -27,9 +26,11 @@ jobs:
       ACCEPTED_SOURCE_BASELINE: 13797491070fc32fd18c2bc52e137130a129ce5a
       PRIVATE_CI_HEAD: 15aac93bf8d8cb385bd2cd3eaf6dd0fd43b63af5
       PRIVATE_CI_RUN: '30794624036'
-      PUBLIC_BASE_RUN: '30823988615'
-      PUBLIC_BASE_APK_SHA256: 000596bfdd95d39c2b3cb83b6f7800947e8d493fe66ea91b219ce7376eb75359
-      PATCH_SHA256: 43aee13b4a99d3476edc53fe898130c2545ed46a3cf7c4c2ec65dc2318456b0c
+      PRIVATE_ARTIFACT_ID: '8848426854'
+      PRIVATE_ARTIFACT_URL: 'https://sdmntprnortheu.oaiusercontent.com/files/00000000-fc50-81f4-b80b-03b62779b85d/raw?se=2026-08-03T15:40:26Z&sp=r&sv=2026-02-06&sr=b&scid=77949e5a-62b9-5f8e-b7f1-5a046a63465c&skoid=a0b9f82a-c86e-4064-a822-2aa38890bb37&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-08-03T11:13:36Z&ske=2026-08-04T11:13:36Z&sks=b&skv=2026-02-06&sig=qby1OHkH4BJHguT0UlXi6124LMN781dc2oc9dml/5S8%3D'
+      PRIVATE_ARTIFACT_ZIP_SHA256: 596ed23ab5ba0761bfe1a7b71de457c6c57f72bc73b168cbcd3927911726a972
+      PRIVATE_INPUT_APK_SHA256: 0a8529841409e12a90b3070457f9698fc806a1fb92980b2f55958f61213475ce
+      PATCH_SHA256: 09f9bc13582574d6753e1e8e427f850e1c65dad4dd37d4fd08b8c4bd0979b0e7
       APK_SHA256: 8747d162b426ce94f517750fa37907512bdfaeba81baf12098850dc1e3a3c5c2
       EXPECTED_SIGNER_SHA256: d92dae5e61910fae171af41f615c00685e5e3e6909512f2a0429df0805db8f76
       EXPECTED_DASHBOARD_BLOB: 4579fef38d08a493cd009316fe0e37384fc90680
@@ -73,23 +74,25 @@ jobs:
           sudo apt-get install -y -qq zstd unzip
           yes | sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' >/dev/null
 
-      - name: Download public CI carrier APK
+      - name: Download exact private CI carrier APK
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf base-artifact
-          mkdir -p base-artifact
-          gh run download "$PUBLIC_BASE_RUN" --repo "$GITHUB_REPOSITORY" --name epicdash-debug-apk --dir base-artifact
-          BASE_APK="$(find base-artifact -type f -name '*.apk' -print -quit)"
+          rm -rf private-carrier
+          mkdir -p private-carrier
+          curl --fail --location --retry 3 --retry-all-errors "$PRIVATE_ARTIFACT_URL" -o private-carrier/artifact.zip
+          echo "$PRIVATE_ARTIFACT_ZIP_SHA256  private-carrier/artifact.zip" | sha256sum -c -
+          unzip -q private-carrier/artifact.zip -d private-carrier/unpacked
+          BASE_APK="$(find private-carrier/unpacked -type f -name '*.apk' -print -quit)"
           test -n "$BASE_APK"
-          echo "$PUBLIC_BASE_APK_SHA256  $BASE_APK" | sha256sum -c -
+          echo "$PRIVATE_INPUT_APK_SHA256  $BASE_APK" | sha256sum -c -
           printf 'BASE_APK=%s\n' "$BASE_APK" >> "$GITHUB_ENV"
 
       - name: Reconstruct exact continuity-signed APK
         shell: bash
         run: |
           set -euo pipefail
-          cat release_payload/rc1.patch.zst.b64.part-* | base64 --decode > rc1.patch.zst
+          base64 --decode release_payload/rc1.patch.zst.b64 > rc1.patch.zst
           echo "$PATCH_SHA256  rc1.patch.zst" | sha256sum -c -
           zstd --decompress --patch-from="$BASE_APK" rc1.patch.zst -o "$APK_NAME"
           echo "$APK_SHA256  $APK_NAME" | sha256sum -c -
@@ -168,14 +171,15 @@ jobs:
             echo
             echo 'SOURCE / BUILD PROVENANCE'
             echo '-------------------------'
-            echo "Private source repository: PJawZK/EpicDash-JZ"
+            echo 'Private source repository: PJawZK/EpicDash-JZ'
             echo "Private authoritative commit: $PRIVATE_SOURCE_COMMIT"
             echo "Accepted application-source baseline: $ACCEPTED_SOURCE_BASELINE"
             echo "Exact private CI assembly head: $PRIVATE_CI_HEAD"
             echo "Private Android-quality run: $PRIVATE_CI_RUN"
-            echo "Public carrier APK run: $PUBLIC_BASE_RUN"
-            echo "Public carrier APK SHA-256: $PUBLIC_BASE_APK_SHA256"
-            echo "Binary patch SHA-256: $PATCH_SHA256"
+            echo "Private workflow artifact ID: $PRIVATE_ARTIFACT_ID"
+            echo "Private workflow artifact ZIP SHA-256: $PRIVATE_ARTIFACT_ZIP_SHA256"
+            echo "Exact private CI input APK SHA-256: $PRIVATE_INPUT_APK_SHA256"
+            echo "Continuity-signing delta SHA-256: $PATCH_SHA256"
             echo "Public curated-source tag target: $PUBLIC_SOURCE_COMMIT"
             echo
             echo 'CONTROLLED ASSET GIT-BLOB SHA-1'
