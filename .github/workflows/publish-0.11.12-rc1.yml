@@ -1,0 +1,222 @@
+name: Publish Epic DashTune 0.11.12 RC1
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  verify-and-publish:
+    if: github.head_ref == 'release/0.11.12-rc1-publish'
+    runs-on: ubuntu-latest
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: v0.11.12-rc.1
+      RELEASE_TITLE: Epic DashTune 0.11.12 RC1
+      PUBLIC_SOURCE_COMMIT: 24ace519ab249178f00972828b7bf20ac2df5580
+      PRIVATE_SOURCE_COMMIT: 6d705d5ae3078a2ade377c51e8fe10b680374f1a
+      ACCEPTED_SOURCE_BASELINE: 13797491070fc32fd18c2bc52e137130a129ce5a
+      PRIVATE_CI_HEAD: 15aac93bf8d8cb385bd2cd3eaf6dd0fd43b63af5
+      PRIVATE_CI_RUN: '30794624036'
+      PUBLIC_BASE_RUN: '30823988615'
+      PUBLIC_BASE_APK_SHA256: 000596bfdd95d39c2b3cb83b6f7800947e8d493fe66ea91b219ce7376eb75359
+      PATCH_SHA256: 43aee13b4a99d3476edc53fe898130c2545ed46a3cf7c4c2ec65dc2318456b0c
+      APK_SHA256: 8747d162b426ce94f517750fa37907512bdfaeba81baf12098850dc1e3a3c5c2
+      EXPECTED_SIGNER_SHA256: d92dae5e61910fae171af41f615c00685e5e3e6909512f2a0429df0805db8f76
+      EXPECTED_DASHBOARD_BLOB: 4579fef38d08a493cd009316fe0e37384fc90680
+      EXPECTED_RUNTIME_BLOB: 216fbc885611200c16ec2fe2bb3ae99856f6ff32
+      EXPECTED_WHATSNEW_BLOB: 305b37475de43da7f9991882f380f3d6cae267b1
+      APK_NAME: Epic-DashTune-0.11.12-rc.1.apk
+      REPORT_NAME: Epic-DashTune-0.11.12-rc.1-verification.txt
+      CHECKSUM_NAME: Epic-DashTune-0.11.12-rc.1.apk.sha256
+
+    steps:
+      - name: Check out release payload
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: Refuse duplicate tag or release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd unzip
+          yes | sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' >/dev/null
+
+      - name: Download public CI carrier APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf base-artifact
+          mkdir -p base-artifact
+          gh run download "$PUBLIC_BASE_RUN" --repo "$GITHUB_REPOSITORY" --name epicdash-debug-apk --dir base-artifact
+          BASE_APK="$(find base-artifact -type f -name '*.apk' -print -quit)"
+          test -n "$BASE_APK"
+          echo "$PUBLIC_BASE_APK_SHA256  $BASE_APK" | sha256sum -c -
+          printf 'BASE_APK=%s\n' "$BASE_APK" >> "$GITHUB_ENV"
+
+      - name: Reconstruct exact continuity-signed APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat release_payload/rc1.patch.zst.b64.part-* | base64 --decode > rc1.patch.zst
+          echo "$PATCH_SHA256  rc1.patch.zst" | sha256sum -c -
+          zstd --decompress --patch-from="$BASE_APK" rc1.patch.zst -o "$APK_NAME"
+          echo "$APK_SHA256  $APK_NAME" | sha256sum -c -
+          printf '%s  %s\n' "$APK_SHA256" "$APK_NAME" > "$CHECKSUM_NAME"
+
+      - name: Verify package, signature, ZIP and controlled assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+          AAPT="$BUILD_TOOLS/aapt"
+          ZIPALIGN="$BUILD_TOOLS/zipalign"
+          test -x "$APKSIGNER"
+          test -x "$AAPT"
+          test -x "$ZIPALIGN"
+
+          "$APKSIGNER" verify --verbose --print-certs "$APK_NAME" | tee apksigner.txt
+          grep -Eq '^Verified using v1 scheme .*: false$' apksigner.txt
+          grep -Eq '^Verified using v2 scheme .*: true$' apksigner.txt
+          grep -Eq '^Number of signers: 1$' apksigner.txt
+          SIGNER="$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/ {print tolower($2); exit}' apksigner.txt)"
+          test "$SIGNER" = "$EXPECTED_SIGNER_SHA256"
+
+          "$AAPT" dump badging "$APK_NAME" | tee aapt-badging.txt
+          grep -Fq "package: name='com.buttonbox.ble.jz' versionCode='1114' versionName='0.11.12-stale1-jz'" aapt-badging.txt
+          grep -Fq "sdkVersion:'26'" aapt-badging.txt
+          grep -Fq "targetSdkVersion:'34'" aapt-badging.txt
+
+          "$ZIPALIGN" -c -P 16 -v 4 "$APK_NAME" | tee zipalign.txt
+          unzip -t "$APK_NAME" | tee unzip-test.txt
+
+          rm -rf controlled-assets
+          mkdir -p controlled-assets
+          unzip -p "$APK_NAME" assets/dashboard_lab.html > controlled-assets/dashboard_lab.html
+          unzip -p "$APK_NAME" assets/dashboard_runtime_snapshot.js > controlled-assets/dashboard_runtime_snapshot.js
+          unzip -p "$APK_NAME" assets/whatsnew.txt > controlled-assets/whatsnew.txt
+          test "$(git hash-object controlled-assets/dashboard_lab.html)" = "$EXPECTED_DASHBOARD_BLOB"
+          test "$(git hash-object controlled-assets/dashboard_runtime_snapshot.js)" = "$EXPECTED_RUNTIME_BLOB"
+          test "$(git hash-object controlled-assets/whatsnew.txt)" = "$EXPECTED_WHATSNEW_BLOB"
+
+      - name: Generate official verification report
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo 'Epic DashTune 0.11.12 RC1 verification report'
+            echo 'Generated by GitHub Actions using official Android build-tools 34.0.0'
+            echo
+            echo 'RESULT'
+            echo '------'
+            echo 'Official Android apksigner verification: PASS'
+            echo 'Package/version identity: PASS'
+            echo 'Continuity signer identity: PASS'
+            echo 'APK Signature Scheme v2: PASS'
+            echo 'ZIP integrity: PASS'
+            echo 'Page-aware alignment: PASS'
+            echo 'Controlled packaged asset equality: PASS'
+            echo 'Physical SM-T500 / Mega144H7 acceptance: NOT RUN in this publication gate'
+            echo
+            echo 'ARTIFACT'
+            echo '--------'
+            echo "Filename: $APK_NAME"
+            echo "SHA-256: $APK_SHA256"
+            echo "Size: $(stat -c '%s' "$APK_NAME") bytes"
+            echo
+            echo 'APPLICATION IDENTITY'
+            echo '--------------------'
+            grep '^package:' aapt-badging.txt
+            grep '^sdkVersion:' aapt-badging.txt
+            grep '^targetSdkVersion:' aapt-badging.txt
+            echo
+            echo 'SIGNATURE VERIFICATION'
+            echo '----------------------'
+            cat apksigner.txt
+            echo
+            echo 'SOURCE / BUILD PROVENANCE'
+            echo '-------------------------'
+            echo "Private source repository: PJawZK/EpicDash-JZ"
+            echo "Private authoritative commit: $PRIVATE_SOURCE_COMMIT"
+            echo "Accepted application-source baseline: $ACCEPTED_SOURCE_BASELINE"
+            echo "Exact private CI assembly head: $PRIVATE_CI_HEAD"
+            echo "Private Android-quality run: $PRIVATE_CI_RUN"
+            echo "Public carrier APK run: $PUBLIC_BASE_RUN"
+            echo "Public carrier APK SHA-256: $PUBLIC_BASE_APK_SHA256"
+            echo "Binary patch SHA-256: $PATCH_SHA256"
+            echo "Public curated-source tag target: $PUBLIC_SOURCE_COMMIT"
+            echo
+            echo 'CONTROLLED ASSET GIT-BLOB SHA-1'
+            echo '-------------------------------'
+            echo "assets/dashboard_lab.html: $EXPECTED_DASHBOARD_BLOB"
+            echo "assets/dashboard_runtime_snapshot.js: $EXPECTED_RUNTIME_BLOB"
+            echo "assets/whatsnew.txt: $EXPECTED_WHATSNEW_BLOB"
+            echo
+            echo 'ZIP ALIGNMENT'
+            echo '-------------'
+            cat zipalign.txt
+            echo
+            echo 'RELEASE STATUS'
+            echo '--------------'
+            echo 'This artifact is an official release candidate and GitHub pre-release.'
+            echo 'It is not yet the accepted field APK. Separate physical acceptance is required.'
+          } > "$REPORT_NAME"
+
+      - name: Publish GitHub pre-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$PUBLIC_SOURCE_COMMIT" \
+            --title "$RELEASE_TITLE" \
+            --notes-file release_payload/RELEASE_NOTES.md \
+            --prerelease \
+            "$APK_NAME" \
+            "$CHECKSUM_NAME" \
+            "$REPORT_NAME"
+
+      - name: Confirm published release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,name,isPrerelease,isDraft,url,assets
+
+      - name: Remove temporary trigger branch
+        if: success()
+        continue-on-error: true
+        shell: bash
+        run: |
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_HEAD_REF"
