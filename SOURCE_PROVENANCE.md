@@ -9,10 +9,8 @@
 - Export workflow run: `30815441574`
 - Exact export-head Android-quality run: `#434` (`30815441856`), successful
 - Export artifact ID: `8856516144`
-- Public pre-provenance application tree: `bd5564ffb171b8566ffa3122210273aed67dc52e`
-- Public Android-quality run on that application tree: `#6` (`30822871731`), successful
-- Final public exact head after provenance/manifest finalization: `232b405b7d2061996f5c47672f196635a667b8ad`
-- Final public Android-quality run: `#8` (`30823533093`), successful
+- Public exact-head before this provenance-only update: `bd5564ffb171b8566ffa3122210273aed67dc52e`
+- Public Android-quality run: `#6` (`30822871731`), successful
 
 The temporary branch added only an export workflow. Application source was taken from the exact private `main` tree above.
 
@@ -43,4 +41,4 @@ The import excludes private signing material and properties, private continuity/
 - dashboard reconnect/stale regression suite passed;
 - all JavaScript characterization/source-contract tests passed;
 - private Android-quality CI passed JVM tests, Android lint, and APK assembly;
-- final public exact-head Android-quality CI passed the same validation, JVM-test, lint, debug-build, and artifact-upload gates.
+- public exact-head Android-quality CI passed the same validation, JVM-test, lint, and debug-build gates.
