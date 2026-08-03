@@ -1,0 +1,1 @@
+RC1 publication retry 2: use Android build-tools already installed on the GitHub runner.
