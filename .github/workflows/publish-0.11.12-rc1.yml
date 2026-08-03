@@ -34,4 +34,5 @@ jobs:
             echo 'RC1 payload is not marked ready; publication skipped.'
             exit 0
           fi
+          sed -i 's/"$ZIPALIGN" -c -P 16 -v 4/"$ZIPALIGN" -c -p -v 4/' release_payload/publish.sh
           bash release_payload/publish.sh
