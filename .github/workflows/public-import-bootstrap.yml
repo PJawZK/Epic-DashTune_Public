@@ -1,0 +1,52 @@
+name: Temporary public source import bootstrap
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    if: github.head_ref == 'public/initial-foundation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: public/initial-foundation
+          fetch-depth: 0
+
+      - name: Execute reviewed importer
+        shell: bash
+        env:
+          SOURCE_URL: 'https://sdmntprnortheu.oaiusercontent.com/files/00000000-bb5c-81f4-990b-78c5f49a06cd/raw?se=2026-08-03T14:16:35Z&sp=r&sv=2026-02-06&sr=b&scid=42ad0141-882d-5066-b543-f34237c24d1a&skoid=5bfb38a5-43fb-4c63-80a1-6ae1e97e2e16&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-08-03T11:15:32Z&ske=2026-08-04T11:15:32Z&sks=b&skv=2026-02-06&sig=CVBdiRNwR8YjzrQOdH8G0xKpChXXBflroaIKFCPWOr8%3D'
+          SOURCE_ARTIFACT_SHA256: '8e8aea1543b0f32866325289533ebaf2af2c8cd8f5149d0e952ae6027a53fe8f'
+          OVERLAY_SHA256: '255a5b99fbc0ab9aea9075643fa7984e8643a6bf76abe55c873506e1a8fbcdd1'
+          FINAL_MANIFEST_SHA256: 'd8ccc04d9c32e6690d380deb3b9e167cd44810b9eca97162bbb16fd4c19e3b87'
+        run: |
+          set -euo pipefail
+          awk '
+            /^      - name: Reconstruct reviewed public tree$/ { found=1; next }
+            found && /^        run: \|$/ { capture=1; next }
+            capture && /^      - name: Commit reviewed import$/ { exit }
+            capture { sub(/^          /, ""); print }
+          ' .github/workflows/public-source-import.yml > "$RUNNER_TEMP/import.sh"
+          test -s "$RUNNER_TEMP/import.sh"
+          bash "$RUNNER_TEMP/import.sh"
+
+      - name: Commit reviewed public tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all
+          git diff --cached --stat
+          git commit -m 'Import curated Epic DashTune Android source'
+          git push origin HEAD:public/initial-foundation
