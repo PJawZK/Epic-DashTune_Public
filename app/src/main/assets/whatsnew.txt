@@ -1,0 +1,5 @@
+EpicDash JZ v0.11.12-stale1-jz
+
+- The DEMO header now follows current synthetic gauge ownership.
+- Diagnostics delays no longer masquerade as native ECU transport stalls.
+- Genuine packet stalls, disconnect invalidation, and current-session authority remain enforced.

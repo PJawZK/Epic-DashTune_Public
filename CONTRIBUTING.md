@@ -21,16 +21,16 @@ Preserve these rules:
 2. Work on a focused branch.
 3. Add or update tests for changed behavior.
 4. Run the repository validators, JVM tests, Android lint, and APK assembly when available.
-5. Describe the changed files, tests executed, build result, safety impact, and remaining uncertainty in the pull request.
+5. Describe changed files, tests executed, build result, safety impact, and remaining uncertainty in the pull request.
 
 ## UX experiments
 
-Large visual experiments, speculative interactions, and prototypes belong in the separate UX project until they are selected for production integration. Production pull requests should include clear acceptance criteria and preserve quick-glance usability.
+Large visual experiments, speculative interactions, and prototypes belong in the separate UX project until selected for production integration. Production pull requests should include clear acceptance criteria and preserve quick-glance usability.
 
 ## Future tuning capability
 
 Proposals involving ECU writes require a separate architecture and safety review before implementation. No WebView, custom math, layout, script, or plugin path may construct raw ECU writes.
 
-## Licence
+## Licence and third-party material
 
-Do not add third-party code, artwork, fonts, or assets unless their licence and attribution are compatible with the eventual repository licence and recorded in the pull request.
+This repository currently has no project-wide licence grant. Contributions cannot be accepted for redistribution until contributor terms and inherited-source licensing are resolved. Do not add third-party code, artwork, fonts, or assets unless their licence and attribution are documented and compatible with the eventual repository licence.
