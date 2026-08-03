@@ -1,0 +1,93 @@
+name: Android quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-build:
+    name: Unit tests, lint and debug build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.2'
+
+      - name: Validate dashboard asset
+        run: python3 tools/validate-dashboard.py
+
+      - name: Run dashboard runtime snapshot JavaScript test
+        run: node app/src/test/js/dashboard_runtime_snapshot_test.js
+
+      - name: Run TPS trace characterization test
+        run: node app/src/test/js/dashboard_tps_trace_characterization_test.js
+
+      - name: Run Diagnostics active-view characterization test
+        run: node app/src/test/js/dashboard_diagnostics_active_view_characterization_test.js
+
+      - name: Run Analysis history scaling characterization test
+        run: node app/src/test/js/dashboard_analysis_history_scaling_characterization_test.js
+
+      - name: Run storage capacity recovery characterization test
+        run: node app/src/test/js/dashboard_storage_capacity_recovery_characterization_test.js
+
+      - name: Run storage save correctness regression
+        run: node app/src/test/js/dashboard_storage_save_correctness_test.js
+
+      - name: Run custom widget scaling characterization test
+        run: node app/src/test/js/dashboard_custom_widget_scaling_characterization_test.js
+
+      - name: Run Activity ownership characterization test
+        run: node app/src/test/js/dashboard_activity_ownership_characterization_test.js
+
+      - name: Run GPS data-truth characterization test
+        run: node app/src/test/js/dashboard_gps_data_truth_characterization_test.js
+
+      - name: Run BLE queue progress characterization test
+        run: node app/src/test/js/dashboard_ble_queue_progress_characterization_test.js
+
+      - name: Run lifecycle instrumentation source contract
+        run: node app/src/test/js/dashboard_lifecycle_instrumentation_test.js
+
+      - name: Run JVM unit tests
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Run Android lint
+        run: gradle --no-daemon lintDebug
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lint-reports
+          path: |
+            app/build/reports/lint-results-debug.*
+            app/build/intermediates/lint_intermediate_text_report/debug/lint-results-debug.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload unsigned/debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: epicdash-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
