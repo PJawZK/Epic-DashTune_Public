@@ -1,0 +1,322 @@
+name: One-time curated public source import
+
+on:
+  push:
+    branches:
+      - public/initial-foundation
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    name: Verify and commit curated source tree
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out import branch
+        uses: actions/checkout@v4
+        with:
+          ref: public/initial-foundation
+          fetch-depth: 0
+
+      - name: Download and verify private export artifact
+        shell: bash
+        env:
+          SOURCE_URL: 'https://sdmntprnortheu.oaiusercontent.com/files/00000000-0228-81f4-abb1-42ebcef5fe5d/raw?se=2026-08-03T13:26:24Z&sp=r&sv=2026-02-06&sr=b&scid=fe301047-bd04-532f-a1eb-15f860a2bb82&skoid=9b41a688-1b44-4731-856e-b0efcf3660ed&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2026-08-03T11:16:09Z&ske=2026-08-04T11:16:09Z&sks=b&skv=2026-02-06&sig=FprQt1nCpfHj00On7Vja6wZPJ1TGBADuV3wIZeR1AS8%3D'
+          SOURCE_ZIP_SHA256: '8e8aea1543b0f32866325289533ebaf2af2c8cd8f5149d0e952ae6027a53fe8f'
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/epic-public-import"
+          rm -rf "$work"
+          mkdir -p "$work/outer" "$work/stage"
+
+          curl --fail --location --retry 3 --retry-all-errors "$SOURCE_URL" -o "$work/source-artifact.zip"
+          echo "$SOURCE_ZIP_SHA256  $work/source-artifact.zip" | sha256sum -c -
+          unzip -q "$work/source-artifact.zip" -d "$work/outer"
+          (cd "$work/outer" && sha256sum -c epic-dashtune-public-source.zip.sha256)
+          unzip -q "$work/outer/epic-dashtune-public-source.zip" -d "$work/unpacked"
+          cp -a "$work/unpacked/epic-dashtune-public-source"/. "$work/stage"/
+          rm -f "$work/stage/FILE_MANIFEST.sha256" "$work/stage/SOURCE_PROVENANCE.txt"
+
+          if find "$work/stage" -type f \( -iname '*.keystore' -o -iname '*.jks' -o -iname '*.p12' -o -iname 'signing.properties' -o -iname 'local.properties' -o -iname '*.apk' -o -iname '*.aab' -o -iname '*.msl' -o -iname '*.mlg' \) -print -quit | grep -q .; then
+            echo 'Forbidden file found in private export' >&2
+            exit 1
+          fi
+
+          if grep -RIlE '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|EPICDASH_STORE_PASSWORD=|EPICDASH_KEY_PASSWORD=|/home/jawz|JZ-Main)' "$work/stage" | grep -q .; then
+            echo 'Potential private or secret-bearing content found' >&2
+            exit 1
+          fi
+
+          python3 "$work/stage/tools/validate-dashboard.py"
+          python3 "$work/stage/tools/test-dashboard-regressions.py"
+          for test in "$work/stage"/app/src/test/js/*.js; do node "$test" >/dev/null; done
+
+          rsync -a --delete "$work/stage/app/" app/
+          rsync -a --delete "$work/stage/gradle/" gradle/
+          rsync -a --delete "$work/stage/tools/" tools/
+          mkdir -p .github/workflows
+          cp "$work/stage/.github/workflows/android-quality.yml" .github/workflows/android-quality.yml
+          cp "$work/stage/build.gradle.kts" .
+          cp "$work/stage/settings.gradle.kts" .
+          cp "$work/stage/gradle.properties" .
+          cp "$work/stage/gradlew" .
+          cp "$work/stage/gradlew.bat" .
+          cp "$work/stage/build-jz.sh" .
+          chmod +x gradlew build-jz.sh
+
+      - name: Add public architecture and provenance documents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs
+
+          cat > docs/ARCHITECTURE.md <<'EOF'
+          # Public architecture overview
+
+          ## Application surfaces
+
+          `DashboardLabActivity` is the launcher and owns the primary LAB WebView, read-only USB transport, LAB-scoped BLE connection, log playback, diagnostics, location integration, and native-to-WebView snapshot publication.
+
+          `MainActivity` remains the legacy stock dashboard/button-box surface. It owns a separate Activity-scoped BLE manager while visible. Activity lifecycle rules prevent the hidden stock surface from retaining transport ownership behind LAB.
+
+          ## Native Android responsibilities
+
+          The Kotlin layer owns:
+
+          - Android permissions and lifecycle;
+          - BLE scanning, connection and the existing three legacy write queues;
+          - USB device selection, permission ownership, CDC transport and read-only TunerStudio output polling;
+          - ECU channel decoding and canonical native state;
+          - GPS collection and legacy GPS payload mapping;
+          - MSL/log playback;
+          - persistent settings and bounded diagnostic history;
+          - generation/session authority and performance measurements;
+          - safe bridge publication into the dashboard WebView.
+
+          ## Dashboard responsibilities
+
+          `app/src/main/assets/dashboard_lab.html` provides the current dashboard/LAB renderer and editor. It owns presentation, layout editing, math-expression evaluation, warning presentation, history graphs, demo scenarios, and user-facing diagnostics.
+
+          The WebView receives structured state from native Android. It does not own USB/BLE transport and cannot construct raw ECU commands.
+
+          ## Read-only ECU flow
+
+          The supported USB path is:
+
+          ```text
+          Android USB host
+            -> supported-device selection
+            -> CDC control/data interface ownership
+            -> plain signature request
+            -> CRC-framed signature synchronization
+            -> CRC-framed output-channel reads
+            -> CRC validation
+            -> INI-profile decoding
+            -> canonical native snapshot
+            -> WebView presentation
+          ```
+
+          `UsbEcuManager` implements discovery and output reads only. No tune-page writes, burns, controller reset, engine-stop command, output control, or generic raw command interface is implemented.
+
+          ## State and freshness authority
+
+          USB attempts and invalidations use a process-local generation authority. Dashboard snapshots carry source/session/revision identity, and stale or non-increasing updates are rejected. Data freshness is based on the accepted ECU packet/snapshot timeline rather than WebView bridge age alone.
+
+          ## BLE queue status
+
+          Button, variable-request and GPS/ADC traffic currently use three independent legacy FIFO queues with one in-flight flag per queue and no global GATT arbiter. Current production policy is characterized and instrumented but deliberately not corrected in this baseline. Queue depth, loss, completion, duration and overlap counters exist to support bounded physical evidence before policy changes.
+
+          ## Future tuning boundary
+
+          Future ECU-write capability must be implemented beside—not inside—the dashboard renderer. The required design is a separate native tuning core with a typed allowlist, exact ECU/INI/tune identity, explicit safety-state machine, no blind retries after uncertain outcomes, read-back verification, deliberate RAM-write/burn separation, backup/recovery procedures, and staged bench/vehicle acceptance.
+          EOF
+
+          cat > docs/BUILDING.md <<'EOF'
+          # Building Epic DashTune
+
+          ## Required toolchain
+
+          - JDK 17
+          - Gradle 8.2 through the included wrapper
+          - Android SDK platform 34
+          - Android build tools 34.0.0
+          - Android Gradle Plugin 8.2.0
+          - Kotlin 1.9.0
+
+          The project supports Android API 26 and newer.
+
+          ## Local setup
+
+          Create an untracked `local.properties` pointing to your Android SDK when Android Studio has not already created it:
+
+          ```properties
+          sdk.dir=/absolute/path/to/Android/Sdk
+          ```
+
+          Then run:
+
+          ```bash
+          python3 tools/validate-dashboard.py
+          python3 tools/test-dashboard-regressions.py
+
+          for test in app/src/test/js/*.js; do
+            node "$test"
+          done
+
+          ./gradlew testDebugUnitTest
+          ./gradlew lintDebug
+          ./gradlew assembleDebug
+          ```
+
+          The resulting debug APK is normally:
+
+          ```text
+          app/build/outputs/apk/debug/app-debug.apk
+          ```
+
+          ## Signing distinction
+
+          No signing key or password is stored in this repository.
+
+          Without an external signing properties file, Android uses an ordinary debug key. Such builds are suitable for development but cannot update a maintainer continuity-signed installation in place.
+
+          The Gradle project can read an external properties file through either:
+
+          ```bash
+          ./gradlew -PepicdashSigningProperties=/absolute/path/to/properties assembleDebug
+          ```
+
+          or:
+
+          ```bash
+          export EPICDASH_SIGNING_PROPERTIES=/absolute/path/to/properties
+          ./gradlew assembleDebug
+          ```
+
+          Do not commit that properties file or its referenced keystore.
+
+          ## Validation reporting
+
+          Report each command as passed, failed, unavailable, or not run. A missing SDK, unavailable dependency cache, or blocked network is an environment limitation—not a passed build.
+          EOF
+
+          cat > LICENSE_STATUS.md <<'EOF'
+          # Licence status
+
+          **No repository-wide licence is currently granted.**
+
+          The code is published for inspection and collaborative review while ownership, inherited-source provenance, artwork attribution, and third-party licensing are audited. In the absence of an explicit licence, normal copyright restrictions apply: public visibility alone does not grant permission to copy, modify, redistribute, sublicense, or use the source in another product.
+
+          Do not assume that Apache-2.0, GPL, MIT, or another open-source licence applies to this repository.
+
+          A future licence decision must:
+
+          1. establish which source and assets were created specifically for Epic DashTune;
+          2. identify inherited EpicDash/EpicEFI Virtual Dash material and its original terms;
+          3. record required copyright and attribution notices;
+          4. confirm that bundled artwork and generated assets may be redistributed;
+          5. separate dependency licences from the licence governing this repository's own source.
+
+          Until that audit is complete, contributions involving substantial copied code or third-party assets should not be submitted.
+          EOF
+
+          cat > THIRD_PARTY_NOTICES.md <<'EOF'
+          # Third-party notices
+
+          This project resolves third-party libraries through Gradle. Those libraries are not relicensed by this repository and remain subject to their own terms.
+
+          Direct dependencies in the initial public source include:
+
+          - AndroidX Core KTX 1.12.0
+          - AndroidX AppCompat 1.6.1
+          - AndroidX Activity 1.8.2
+          - AndroidX ConstraintLayout 2.1.4
+          - AndroidX Lifecycle Runtime KTX 2.7.0
+          - Material Components for Android 1.11.0
+          - Google Play Services Location 21.3.0
+          - Kotlin coroutines for Android 1.7.3
+          - Gson 2.10.1
+          - JUnit 4.13.2 and `org.json` for tests
+          - Gradle wrapper 8.2
+
+          Consult each upstream artifact's published licence and notices when distributing a compiled application. This list is informational and is not a substitute for the pending inherited-source and asset audit described in [LICENSE_STATUS.md](LICENSE_STATUS.md).
+          EOF
+
+          cat > SOURCE_PROVENANCE.md <<'EOF'
+          # Source provenance
+
+          ## Initial public import
+
+          - Private source repository: `PJawZK/EpicDash-JZ`
+          - Exact private `main` commit exported: `6d705d5ae3078a2ade377c51e8fe10b680374f1a`
+          - Accepted application-source baseline represented by that tree: `13797491070fc32fd18c2bc52e137130a129ce5a`
+          - Temporary export-workflow branch head: `6ded39dda336ef2c41ab84dc6225655b7b57ef0d`
+          - Export workflow run: `30815441574`
+          - Exact export-head Android-quality run: `#434` (`30815441856`), successful
+          - Export artifact ID: `8856516144`
+
+          The temporary branch added only an export workflow. Application source was taken from the exact private `main` tree above.
+
+          ## Allowlisted paths
+
+          The initial export includes:
+
+          - `app/`
+          - `gradle/`
+          - `tools/`
+          - `.github/workflows/android-quality.yml`
+          - root Gradle configuration and wrapper files
+          - `build-jz.sh`
+
+          Public-facing README, architecture, build, security, contribution, export-policy, provenance, and licensing-status documents were prepared separately for this public repository.
+
+          ## Excluded material
+
+          The import excludes private signing material and properties, private continuity/handoff documents, assistant-specific instructions, internal audit/history documents, release-management internals, generated APKs/build output, personal paths, raw vehicle logs, tune/configuration artifacts, and sensitive diagnostics.
+
+          ## Validation performed before upload
+
+          - export archive checksum verified;
+          - path/name and content scans for keys, signing files, credentials, personal paths, APKs, logs, and diagnostic evidence;
+          - Android package/version and manifest reviewed;
+          - read-only USB transport boundary reviewed;
+          - dashboard validator passed;
+          - dashboard reconnect/stale regression suite passed;
+          - all JavaScript characterization/source-contract tests passed;
+          - private Android-quality CI used as compile, JVM-test, lint, and assembly gate.
+          EOF
+
+      - name: Final public-tree audit and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .public-import-trigger .github/workflows/public-source-import.yml FILE_MANIFEST.sha256
+
+          if find . -path ./.git -prune -o -type f \( -iname '*.keystore' -o -iname '*.jks' -o -iname '*.p12' -o -iname 'signing.properties' -o -iname 'local.properties' -o -iname '*.apk' -o -iname '*.aab' -o -iname '*.msl' -o -iname '*.mlg' \) -print -quit | grep -q .; then
+            echo 'Forbidden file found in final public tree' >&2
+            exit 1
+          fi
+
+          if grep -RIlE '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{30,}|EPICDASH_STORE_PASSWORD=|EPICDASH_KEY_PASSWORD=|/home/jawz|JZ-Main)' . --exclude-dir=.git --exclude='FILE_MANIFEST.sha256' | grep -q .; then
+            echo 'Potential private or secret-bearing content found in final tree' >&2
+            exit 1
+          fi
+
+          find . -path ./.git -prune -o -type f ! -name FILE_MANIFEST.sha256 -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sed 's#  \./#  #' > FILE_MANIFEST.sha256
+          sha256sum -c FILE_MANIFEST.sha256 >/dev/null
+          python3 tools/validate-dashboard.py
+          python3 tools/test-dashboard-regressions.py
+          for test in app/src/test/js/*.js; do node "$test" >/dev/null; done
+
+      - name: Commit reviewed public source import
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all
+          git diff --cached --stat
+          git commit -m 'Import curated Epic DashTune Android source'
+          git push origin HEAD:public/initial-foundation
