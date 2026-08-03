@@ -1,0 +1,45 @@
+# Android / Gradle
+.gradle/
+build/
+**/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Signing and credentials
+*.jks
+*.keystore
+signing.properties
+*.p12
+*.pem
+*.key
+.env
+.env.*
+
+# Build and test artifacts
+*.apk
+*.aab
+*.apks
+artifacts/
+reports/
+*.log
+
+# Vehicle and diagnostic evidence
+*.msl
+*.mlg
+*.csv
+*.zip
+recordings/
+diagnostics/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*~
+*.swp
