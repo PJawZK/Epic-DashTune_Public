@@ -9,6 +9,8 @@
 - Export workflow run: `30815441574`
 - Exact export-head Android-quality run: `#434` (`30815441856`), successful
 - Export artifact ID: `8856516144`
+- Public exact-head before this provenance-only update: `bd5564ffb171b8566ffa3122210273aed67dc52e`
+- Public Android-quality run: `#6` (`30822871731`), successful
 
 The temporary branch added only an export workflow. Application source was taken from the exact private `main` tree above.
 
@@ -20,7 +22,7 @@ The initial export includes:
 - `gradle/`
 - `tools/`
 - `.github/workflows/android-quality.yml`
-- root Gradle configuration and wrapper files
+- root Gradle configuration files
 - `build-jz.sh`
 
 Public-facing README, architecture, build, security, contribution, export-policy, provenance, and licensing-status documents were prepared separately for this public repository. The initial public Git import excludes the binary Gradle wrapper JAR and inherited logo PNG artwork pending separate provenance review; CI provisions Gradle 8.2 directly and a neutral vector placeholder supplies the referenced splash/icon resource.
@@ -38,4 +40,5 @@ The import excludes private signing material and properties, private continuity/
 - dashboard validator passed;
 - dashboard reconnect/stale regression suite passed;
 - all JavaScript characterization/source-contract tests passed;
-- private Android-quality CI used as compile, JVM-test, lint, and assembly gate.
+- private Android-quality CI passed JVM tests, Android lint, and APK assembly;
+- public exact-head Android-quality CI passed the same validation, JVM-test, lint, and debug-build gates.
