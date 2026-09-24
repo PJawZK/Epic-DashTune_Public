@@ -10,11 +10,11 @@ const ble = read('app/src/main/java/com/buttonbox/ble/BleManager.kt');
 const main = read('app/src/main/java/com/buttonbox/ble/MainActivity.kt');
 const lab = read('app/src/main/java/com/buttonbox/ble/DashboardLabActivity.kt');
 
-for (const contract of [
-  'applicationId = "com.buttonbox.ble.jz"',
-  'versionCode = 1114',
-  'versionName = "0.11.12-stale1-jz"'
-]) assert.ok(gradle.includes(contract), `missing identity contract: ${contract}`);
+assert.ok(gradle.includes('applicationId = "com.buttonbox.ble.jz"'), 'application identity changed unexpectedly');
+const versionCode = Number((gradle.match(/versionCode\s*=\s*(\d+)/) || [])[1] || 0);
+const versionName = String((gradle.match(/versionName\s*=\s*"([^"]+)"/) || [])[1] || '');
+assert.ok(versionCode >= 1203, 'candidate version regressed below the current qualified UI line');
+assert.ok(versionName.length > 0, 'versionName missing');
 
 for (const contract of [
   'const val REQUEST_INTERVAL_MS = 100L',

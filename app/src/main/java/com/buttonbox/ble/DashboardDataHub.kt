@@ -60,9 +60,8 @@ object DashboardDataHub {
     @Volatile private var usbState: String = "no_profile"
     @Volatile private var usbStateMessage: String = "Import mainController.ini"
     @Volatile private var usbPollTargetHz: Int = 20
-    @Volatile private var performanceProfile: PerformanceProfile = PerformanceProfile.FULL_OPTIMIZED
     @Volatile private var liveTransportPreference: String = "auto"
-    @Volatile private var usbChannelCatalog: JSONArray = JSONArray()
+    @Volatile private var usbChannelCatalogJson: String = "[]"
     @Volatile private var usbRequiredNames: Set<String> = emptySet()
     private val packetCounter = AtomicLong(0)
     private val scanCount = AtomicLong(0)
@@ -116,8 +115,12 @@ object DashboardDataHub {
         snapshotRevision.incrementAndGet()
     }
     fun getLiveTransportPreference(): String = liveTransportPreference
-    fun setUsbChannelCatalog(catalog: JSONArray) { usbChannelCatalog = catalog; snapshotRevision.incrementAndGet() }
-    fun getUsbChannelCatalog(): JSONArray = usbChannelCatalog
+    fun setUsbChannelCatalog(catalog: JSONArray) {
+        usbChannelCatalogJson = runCatching { catalog.toString() }.getOrDefault("[]")
+        snapshotRevision.incrementAndGet()
+    }
+    fun getUsbChannelCatalog(): JSONArray =
+        runCatching { JSONArray(usbChannelCatalogJson) }.getOrElse { JSONArray() }
     fun setUsbRequiredChannels(names: Collection<String>) {
         val next = names.asSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
         if (next == usbRequiredNames) return
@@ -125,12 +128,6 @@ object DashboardDataHub {
         snapshotRevision.incrementAndGet()
     }
     fun setUsbPollTargetHz(hz: Int) { usbPollTargetHz = hz.coerceIn(5, 20); snapshotRevision.incrementAndGet() }
-    fun setPerformanceProfile(profile: PerformanceProfile) {
-        performanceProfile = profile
-        PerformanceMetrics.setProfile(profile)
-        snapshotRevision.incrementAndGet()
-    }
-    fun currentPerformanceProfile(): PerformanceProfile = performanceProfile
     fun currentSnapshotRevision(): Long = snapshotRevision.get()
     fun setUsbState(streaming: Boolean, state: String, message: String, generation: Long) {
         if (generation < usbSessionId.get()) return
@@ -153,16 +150,9 @@ object DashboardDataHub {
         val startedNs = System.nanoTime()
         val now = if (elapsedMs > 0) elapsedMs else SystemClock.elapsedRealtime()
         val previous = usbFrame.get()
-        // Optimized profiles publish a fresh frame map that is never mutated after this callback,
-        // so retain it directly and avoid a second per-frame map allocation. Legacy mode keeps the
-        // defensive copy to provide a meaningful A/B baseline in Performance Lab.
-        val stable: Map<String, Float> = if (performanceProfile.selectiveDecode) {
-            incoming
-        } else {
-            LinkedHashMap<String, Float>(incoming.size).also { copy ->
-                incoming.forEach { (key, value) -> if (value.isFinite()) copy[key] = value }
-            }
-        }
+        // The accepted optimized path publishes an immutable fresh frame map per callback.
+        // Retain it directly and avoid a second per-frame map allocation.
+        val stable: Map<String, Float> = incoming
         usbFrame.set(UsbFrame(stable, now, previous.frameCount + 1L, measuredHz))
         usbStreaming = true
         snapshotRevision.incrementAndGet()
@@ -335,32 +325,11 @@ object DashboardDataHub {
         val selectedUsbFrame = usbFrame.get()
         val age = if (useUsb) { if (selectedUsbFrame.elapsedMs > 0L) now - selectedUsbFrame.elapsedMs else -1L }
             else if (lastPacketElapsedMs > 0L) now - lastPacketElapsedMs else -1L
-        val tpsTrace = JSONObject()
-        if (useUsb) {
-            val trace = selectedUsbFrame.values
-            fun traceValue(name: String, jsonName: String = name) {
-                trace[name]?.takeIf { it.isFinite() }?.let { tpsTrace.put(jsonName, it.toDouble()) }
-            }
-            traceValue("_traceTpsRawNumeric", "rawNumeric")
-            traceValue("_traceTpsByte0", "rawByte0")
-            traceValue("_traceTpsByte1", "rawByte1")
-            traceValue("_traceTpsDecoded", "decoded")
-            traceValue("_traceTpsOffset", "offset")
-            traceValue("_traceTpsScale", "scale")
-            traceValue("TPSValue", "profileTpsValue")
-            traceValue("rawTps1Primary")
-            traceValue("tpsADC")
-            traceValue("throttlePedalPosition")
-            traceValue("DriverThrottleIntent")
-            traceValue("tps", "canonical")
-            tpsTrace.put("frameElapsedMs", if (selectedUsbFrame.elapsedMs > 0L) selectedUsbFrame.elapsedMs else JSONObject.NULL)
-        }
         return JSONObject()
             .put("revision", snapshotRevision.get())
             .put("usbSessionId", if (useUsb) usbSessionId.get() else -1L)
             .put("capturedElapsedMs", now)
             .put("capturedEpochMs", System.currentTimeMillis())
-            .put("performanceProfile", performanceProfile.toJson())
             .put("connected", selectedConnected).put("transport", transport)
             .put("transportPreference", liveTransportPreference)
             .put("connectionPhase", if (useUsb) usbState else connectionPhase.name.lowercase())
@@ -370,7 +339,6 @@ object DashboardDataHub {
             .put("callbackRateHz", if (useUsb) selectedUsbFrame.rateHz else estimatedCallbackRateHz)
             .put("pollTargetHz", if (useUsb) usbPollTargetHz else JSONObject.NULL)
             .put("channels", channels).put("channelAgesMs", channelAges).put("data", data)
-            .put("tpsTrace", tpsTrace)
             .put("localChannels", localChannels).put("localChannelAgesMs", localAges).put("localData", localData)
             .put("gpsActive", gpsActive).put("gpsPermissionGranted", gpsPermissionGranted)
             .put("gpsFixTimeEpochMs", if (gpsFixTimeEpochMs > 0L) gpsFixTimeEpochMs else JSONObject.NULL)
@@ -402,7 +370,6 @@ object DashboardDataHub {
             .put("receivedBytes", receivedByteCount.get())
             .put("malformedBytes", malformedByteCount.get())
             .put("longestGapMs", longestPacketGapMs)
-            .put("performanceProfile", performanceProfile.toJson())
             .put("snapshotRevision", snapshotRevision.get())
             .put("usbSessionId", usbSessionId.get())
             .put("performance", PerformanceMetrics.snapshotJson())

@@ -3,13 +3,14 @@
 ## Required toolchain
 
 - JDK 17
-- Gradle 8.2 installed locally (CI provisions the exact version)
+- Gradle 8.2 installed locally (public CI provisions the exact version)
 - Android SDK platform 34
-- Android build tools 34.0.0
+- Android build tools 34.0.0 or compatible SDK tooling
 - Android Gradle Plugin 8.2.0
-- Kotlin 1.9.0
 
 The project supports Android API 26 and newer.
+
+The curated public tree intentionally omits `gradle-wrapper.jar`, so use an installed/provisioned Gradle 8.2 rather than relying on `./gradlew` in this repository.
 
 ## Local setup
 
@@ -29,12 +30,12 @@ for test in app/src/test/js/*.js; do
   node "$test"
 done
 
-gradle testDebugUnitTest
-gradle lintDebug
-gradle assembleDebug
+gradle --no-daemon testDebugUnitTest
+gradle --no-daemon lintDebug
+gradle --no-daemon assembleDebug
 ```
 
-The resulting debug APK is normally:
+The debug APK is normally:
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
@@ -42,9 +43,9 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## Signing distinction
 
-No signing key or password is stored in this repository.
+No signing key, private key, password, or signing properties file is stored in this repository.
 
-Without an external signing properties file, Android uses an ordinary debug key. Such builds are suitable for development but cannot update a maintainer continuity-signed installation in place.
+Without an external signing-properties file, Android uses the ordinary debug signing configuration. Such a build can be useful for compatibility testing but **must not be assumed to update a continuity-signed Epic DashTune installation in place**.
 
 The Gradle project can read an external properties file through either:
 
@@ -61,41 +62,34 @@ gradle assembleDebug
 
 Do not commit that properties file or its referenced keystore.
 
-## Official distributed RC1
+## Current 0.12.5 RC1 compatibility line
 
-The canonical maintainer-distributed release candidate is available from [GitHub Release `v0.11.12-rc.1`](https://github.com/PJawZK/Epic-DashTune_Public/releases/tag/v0.11.12-rc.1).
+The source identity is:
 
-- APK: `Epic-DashTune-0.11.12-rc.1.apk`
-- SHA-256: `8747d162b426ce94f517750fa37907512bdfaeba81baf12098850dc1e3a3c5c2`
-- Package: `com.buttonbox.ble.jz`
-- Version: `0.11.12-stale1-jz` (`1114`)
-- Continuity signer certificate SHA-256: `d92dae5e61910fae171af41f615c00685e5e3e6909512f2a0429df0805db8f76`
+- package: `com.buttonbox.ble.jz`
+- version: `0.12.5-tuner-live-lazy-jz` (`1207`)
+- private application-source baseline: `9de5f4129cddc75692b39b84069f658c6a92ce61`
 
-The GitHub Release also contains a checksum file and the complete official Android build-tools verification report.
+The final GitHub release record and checksum asset are authoritative for the exact distributed `v0.12.5-rc.1` APK. Verify the release APK against its published SHA-256 before testing.
 
-A locally assembled debug APK is not the official RC1, even when built from identical source. Do not re-sign, realign, recompress, or otherwise modify the released APK; any byte change invalidates its published SHA-256 and may invalidate update continuity.
+Because this release is primarily for wider hardware/INI compatibility evidence, the release notes must state whether its signer matches the historical continuity signer. Do not infer signer continuity from the unchanged package ID.
 
-To verify a downloaded copy:
+## Historical 0.11.12 RC1
 
-```bash
-sha256sum -c Epic-DashTune-0.11.12-rc.1.apk.sha256
-$ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose --print-certs Epic-DashTune-0.11.12-rc.1.apk
-$ANDROID_HOME/build-tools/34.0.0/zipalign -c -p -v 4 Epic-DashTune-0.11.12-rc.1.apk
-unzip -t Epic-DashTune-0.11.12-rc.1.apk
-```
+`v0.11.12-rc.1` remains available in release history. Its documented continuity signer certificate SHA-256 is:
 
-Expected signature summary:
+`d92dae5e61910fae171af41f615c00685e5e3e6909512f2a0429df0805db8f76`
 
-- APK Signature Scheme v2: true
-- Number of signers: 1
-- Signer certificate SHA-256: `d92dae5e61910fae171af41f615c00685e5e3e6909512f2a0429df0805db8f76`
+That historical signer fact does not automatically apply to later compatibility-test artifacts.
 
-RC1 remains a pre-release until the separately controlled physical acceptance procedure has passed.
+## Safety note
+
+1207 is not ECU read-only. A compatibility tester who does not intend to tune should avoid editing values and avoid Burn. Production tune mutation remains guarded by exact firmware/profile identity, complete TuneSnapshot authority, native semantic target resolution, bounded write, exact acknowledgement/read-back and full-snapshot verification.
 
 ## Validation reporting
 
 Report each command as passed, failed, unavailable, or not run. A missing SDK, unavailable dependency cache, or blocked network is an environment limitation—not a passed build.
 
-## Initial binary-export note
+## Public binary/artwork exclusions
 
-The first public import excludes the Gradle wrapper JAR and inherited logo PNGs while their binary and artwork provenance is reviewed. CI installs Gradle 8.2 directly, and a neutral vector placeholder keeps the Android resource tree buildable.
+The public source excludes the binary Gradle wrapper JAR and inherited private PNG logo artwork pending provenance review. CI installs Gradle 8.2 directly, and the public neutral vector placeholder keeps the Android resource tree buildable.

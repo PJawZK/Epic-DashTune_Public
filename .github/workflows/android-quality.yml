@@ -1,8 +1,15 @@
 name: Android quality
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: android-quality-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -30,11 +37,71 @@ jobs:
       - name: Validate dashboard asset
         run: python3 tools/validate-dashboard.py
 
+      - name: Run dashboard reconnect/stale regression tests
+        run: python3 tools/test-dashboard-regressions.py
+
+      - name: Validate T3 manager safety contract
+        run: python3 tools/validate-t3-manager.py
+
       - name: Run dashboard runtime snapshot JavaScript test
         run: node app/src/test/js/dashboard_runtime_snapshot_test.js
 
-      - name: Run TPS trace characterization test
+      - name: Run TPS direct-value characterization test
         run: node app/src/test/js/dashboard_tps_trace_characterization_test.js
+
+      - name: Run single optimized runtime characterization test
+        run: node app/src/test/js/performance_single_path_characterization_test.js
+
+      - name: Run application shell navigation characterization test
+        run: node app/src/test/js/application_shell_navigation_characterization_test.js
+
+      - name: Run Tuner hierarchy navigation characterization test
+        run: node app/src/test/js/tuner_hierarchy_navigation_characterization_test.js
+
+      - name: Run Tuner runtime correction characterization test
+        run: node app/src/test/js/tuner_runtime_correction_characterization_test.js
+
+      - name: Run Tuner 1197 UI correction characterization test
+        run: node app/src/test/js/tuner_ui_1197_characterization_test.js
+
+      - name: Run Tuner 1198 phone responsive characterization test
+        run: node app/src/test/js/tuner_ui_1198_phone_responsive_characterization_test.js
+
+      - name: Run Tuner 1199 table edit workflow characterization test
+        run: node app/src/test/js/tuner_ui_1199_table_edit_characterization_test.js
+
+      - name: Run Tuner 1200 phone curves/shell characterization test
+        run: node app/src/test/js/tuner_ui_1200_phone_curves_shell_characterization_test.js
+
+      - name: Run Tuner 1201 structural shared shell characterization test
+        run: node app/src/test/js/tuner_ui_1201_shared_shell_characterization_test.js
+
+      - name: Run Tuner 1202 shell actions/orientation characterization test
+        run: node app/src/test/js/tuner_ui_1202_shell_actions_orientation_characterization_test.js
+
+      - name: Run Tuner 1203 lock/rotation characterization test
+        run: node app/src/test/js/tuner_ui_1203_rotation_lock_characterization_test.js
+
+      - name: Run Tuner 1206/1207 performance characterization
+        run: node app/src/test/js/tuner_ui_1206_performance_characterization_test.js
+
+      - name: Run durable Tuner project-state runtime test
+        run: node app/src/test/js/tuner_project_state_runtime_test.js
+
+      - name: Run Tuner reinstall recovery bundle characterization test
+        run: node app/src/test/js/tuner_recovery_bundle_characterization_test.js
+
+      - name: Run Tuner no-project recovery UI runtime test
+        run: node app/src/test/js/tuner_recovery_ui_runtime_test.js
+
+      - name: Run Tuner complete snapshot project-value runtime test
+        run: node app/src/test/js/tuner_snapshot_array_values_runtime_test.js
+
+      - name: Run Tuner offline Tables/Curves runtime test
+        run: node app/src/test/js/tuner_offline_surfaces_runtime_test.js
+
+      - name: Run Tuner connection auto-refresh runtime test
+        run: node app/src/test/js/tuner_connection_refresh_runtime_test.js
 
       - name: Run Diagnostics active-view characterization test
         run: node app/src/test/js/dashboard_diagnostics_active_view_characterization_test.js
@@ -57,11 +124,35 @@ jobs:
       - name: Run GPS data-truth characterization test
         run: node app/src/test/js/dashboard_gps_data_truth_characterization_test.js
 
+      - name: Run semantic tuning preview characterization test
+        run: node app/src/test/js/t4_semantic_preview_characterization_test.js
+
+      - name: Run INI condition compatibility characterization test
+        run: node app/src/test/js/ini_condition_compatibility_characterization_test.js
+
+      - name: Run W4 vehicle RAM characterization test
+        run: node app/src/test/js/w4_vehicle_ram_characterization_test.js
+
+      - name: Run T5 tuning array characterization test
+        run: node app/src/test/js/t5_tuning_array_characterization_test.js
+
+      - name: Run T6 persistent burn characterization test
+        run: node app/src/test/js/t6_persistent_burn_characterization_test.js
+
+      - name: Run normal tuner read/write characterization test
+        run: node app/src/test/js/tuning_write_characterization_test.js
+
+      - name: Run production tuner authority contract
+        run: node app/src/test/js/production_tuner_contract_test.js
+
       - name: Run BLE queue progress characterization test
         run: node app/src/test/js/dashboard_ble_queue_progress_characterization_test.js
 
       - name: Run lifecycle instrumentation source contract
         run: node app/src/test/js/dashboard_lifecycle_instrumentation_test.js
+
+      - name: Run Tuner lifecycle/profile restore characterization
+        run: node app/src/test/js/tuner_lifecycle_profile_restore_characterization_test.js
 
       - name: Run JVM unit tests
         run: gradle --no-daemon testDebugUnitTest
@@ -90,4 +181,4 @@ jobs:
           name: epicdash-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30

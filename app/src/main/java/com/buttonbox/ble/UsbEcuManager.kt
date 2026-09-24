@@ -25,12 +25,17 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.CRC32
 import kotlin.math.min
 
 /**
- * Read-only Android USB-host transport for rusEFI/EpicEFI TunerStudio output channels.
- * No controller command capable of changing ECU state is implemented here.
+ * Android USB-host transport for rusEFI/EpicEFI TunerStudio output channels.
+ *
+ * Production tuning is semantic and INI-driven: complete authoritative TuneSnapshot reads,
+ * bounded RAM writes with exact read-back/full-snapshot verification, and explicit Save/Burn.
+ * Historical T3/W4/T6 proof entry points are retired from the product surface; legacy recovery
+ * markers remain detectable so installed devices fail closed rather than silently discarding them.
  *
  * v0.11.4 retains the proven v0.11.3 CRC protocol path and replaces tiny split USB reads
  * preflight. CRC frames are submitted in exactly one Android bulk transfer, a framed S command
@@ -97,8 +102,12 @@ class UsbEcuManager(
     }
 
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+    @Volatile private var usbOwnerThread: Thread? = null
     private val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
-        Thread(runnable, "EpicDash-USB").apply { isDaemon = true }
+        Thread(runnable, "EpicDash-USB").apply {
+            isDaemon = true
+            usbOwnerThread = this
+        }
     }
     private val active = AtomicBoolean(false)
     private val reconnectQueued = AtomicBoolean(false)
@@ -108,6 +117,8 @@ class UsbEcuManager(
     private val pendingPermissionRequest = UsbPermissionRequestTracker()
     private val permissionRequestCoordinator =
         UsbPermissionRequestCoordinator(generationAuthority, pendingPermissionRequest)
+    private val t3RecoveryStore = T3RamRecoveryFileStore(context)
+    private val t6RecoveryStore = T6PersistentBurnRecoveryFileStore(context)
     private var loopFuture: ScheduledFuture<*>? = null
     private var retryFuture: ScheduledFuture<*>? = null
     private var connection: UsbDeviceConnection? = null
@@ -119,7 +130,6 @@ class UsbEcuManager(
 
     @Volatile private var profile: UsbTunerStudioProfile? = null
     @Volatile private var preferredPollHz: Int = 20
-    @Volatile private var performanceProfile: PerformanceProfile = PerformanceProfile.FULL_OPTIMIZED
     @Volatile private var requestedChannelNames: Set<String> = emptySet()
     @Volatile private var decodePlan: List<UsbOutputChannel> = emptyList()
     @Volatile private var canonicalDecodePlan: List<Pair<CanonicalSpec, List<UsbOutputChannel>>> = emptyList()
@@ -142,6 +152,7 @@ class UsbEcuManager(
     @Volatile private var lastDisconnectCause: String = ""
     @Volatile private var latestOutputBlock: ByteArray? = null
     @Volatile private var latestOutputBlockElapsedMs: Long = 0L
+    @Volatile private var latestOutputBlockGeneration: Long = -1L
     @Volatile private var longestReadMs: Long = 0L
     @Volatile private var handshakeStage: String = "idle"
     @Volatile private var selectedInterfaceId: Int = -1
@@ -159,6 +170,56 @@ class UsbEcuManager(
     @Volatile private var setControlLineStateResult: Int = Int.MIN_VALUE
     @Volatile private var successfulProbeMode: String = ""
     @Volatile private var consecutiveFailures: Int = 0
+
+    // T1 complete read-only tune snapshot. latestTuneSnapshot intentionally survives USB reconnects
+    // within the same imported profile so the next successful read can be compared byte-for-byte.
+    @Volatile private var tuneSnapshotStatus: String = "not_run"
+    @Volatile private var tuneSnapshotError: String = ""
+    @Volatile private var tuneSnapshotProfileFingerprint: String = ""
+    @Volatile private var tuneSnapshotFingerprint: String = ""
+    @Volatile private var tuneSnapshotPreviousFingerprint: String = ""
+    @Volatile private var tuneSnapshotMatchesPrevious: Boolean? = null
+    @Volatile private var tuneSnapshotGeneration: Long = -1L
+    @Volatile private var tuneSnapshotTotalBytes: Int = 0
+    @Volatile private var tuneSnapshotChunksRead: Int = 0
+    @Volatile private var tuneSnapshotChunksTotal: Int = 0
+    @Volatile private var tuneSnapshotElapsedMs: Long = 0L
+    @Volatile private var tuneSnapshotCapturedAtEpochMs: Long = 0L
+    @Volatile private var tuneSnapshotComparisonJson: String = ""
+    @Volatile private var latestTuneSnapshot: TuneSnapshot? = null
+
+    // One neutral production USB-operation owner. Historical proof flows no longer participate in
+    // product operation ownership; normal Read/Write/Burn acquires TUNER exclusively.
+    private enum class UsbOperationOwner(val diagnosticName: String) { TUNER("TUNER") }
+    private val exclusiveOperationOwner = AtomicReference<UsbOperationOwner?>(null)
+
+    private fun acquireUsbOperation(owner: UsbOperationOwner) {
+        require(exclusiveOperationOwner.compareAndSet(null, owner)) { "Another USB operation is already running" }
+    }
+
+    private fun releaseUsbOperation(owner: UsbOperationOwner) {
+        exclusiveOperationOwner.compareAndSet(owner, null)
+    }
+
+    private val tuningDirtyPageLock = Any()
+    private val tuningDirtyPageNumbers = linkedSetOf<Int>()
+    @Volatile private var tuningWriteStatus: String = "idle"
+    @Volatile private var tuningWriteDetail: String = ""
+    @Volatile private var tuningWriteUncertain: Boolean = false
+    @Volatile private var tuningLastReadFingerprint: String = ""
+    @Volatile private var tuningLastReadElapsedMs: Long = 0L
+    @Volatile private var tuningLastWorkspaceBuildElapsedMs: Long = 0L
+    @Volatile private var tuningLastWorkspaceJsonElapsedMs: Long = 0L
+    @Volatile private var tuningWorkspaceCacheKey: String = ""
+    @Volatile private var tuningWorkspaceCache: TuningWorkspaceSnapshot? = null
+    @Volatile private var tuningWorkspaceJsonCacheKey: String = ""
+    @Volatile private var tuningWorkspaceJsonCache: JSONObject? = null
+    @Volatile private var tuningWorkspaceLastCacheHit: Boolean = false
+    @Volatile private var tuningWorkspaceCacheReuseCount: Long = 0L
+    @Volatile private var tuningIniCompatibilityCacheKey: String = ""
+    @Volatile private var tuningIniCompatibilityCache: JSONObject? = null
+    @Volatile private var tuningLastWriteResult: TuningWriteBatchResult? = null
+    @Volatile private var tuningLastBurnResult: TuningBurnResult? = null
 
     private val probeLock = Any()
     private val probeAttempts = mutableListOf<String>()
@@ -287,6 +348,7 @@ class UsbEcuManager(
 
     fun setProfile(value: UsbTunerStudioProfile?) {
         profile = value
+        resetTuneSnapshot(clearPrevious = true)
         rebuildDecodePlan()
         consecutiveFailures = 0
         lastError = ""
@@ -299,15 +361,6 @@ class UsbEcuManager(
             setState(State.WAITING_DEVICE, "Profile ready • ${value.channels.size} channels", generationAuthority.current())
         }
     }
-
-    fun setPerformanceProfile(value: PerformanceProfile) {
-        performanceProfile = value
-        PerformanceMetrics.setProfile(value)
-        rebuildDecodePlan()
-        callback.onUsbLog("Performance profile: ${value.label}")
-    }
-
-    fun currentPerformanceProfile(): PerformanceProfile = performanceProfile
 
     fun setRequiredChannels(names: Collection<String>) {
         val next = names.asSequence()
@@ -332,14 +385,10 @@ class UsbEcuManager(
             spec to spec.candidates.mapNotNull { byLower[it.lowercase(Locale.US)] }.distinctBy { it.name }
         }
         canonicalDecodePlan = canonical
-        decodePlan = if (!performanceProfile.selectiveDecode) {
-            selectedProfile.channels
-        } else {
-            val needed = LinkedHashSet<UsbOutputChannel>()
-            requestedChannelNames.forEach { name -> byLower[name.lowercase(Locale.US)]?.let(needed::add) }
-            canonical.forEach { (_, channels) -> needed.addAll(channels) }
-            needed.toList().sortedBy { it.offset }
-        }
+        val needed = LinkedHashSet<UsbOutputChannel>()
+        requestedChannelNames.forEach { name -> byLower[name.lowercase(Locale.US)]?.let(needed::add) }
+        canonical.forEach { (_, channels) -> needed.addAll(channels) }
+        decodePlan = needed.toList().sortedBy { it.offset }
         PerformanceMetrics.setCounter("decodePlanChannels", decodePlan.size.toLong())
         PerformanceMetrics.setCounter("profileChannels", selectedProfile.channels.size.toLong())
     }
@@ -356,6 +405,53 @@ class UsbEcuManager(
 
     fun currentMeasuredHz(): Double = if (state == State.STREAMING) measuredHz else 0.0
     fun currentPollTargetHz(): Int = preferredPollHz
+
+    fun hasSupportedUsbDevicePresent(): Boolean = runCatching {
+        usbManager.deviceList.values.any { device ->
+            UsbDeviceSelectionPolicy.isSupportedDevice(selectionDescriptor(device))
+        }
+    }.getOrDefault(false)
+
+
+
+
+
+    private fun invalidateTuningWorkspaceCache() {
+        tuningWorkspaceCacheKey = ""
+        tuningWorkspaceCache = null
+        tuningWorkspaceJsonCacheKey = ""
+        tuningWorkspaceJsonCache = null
+        tuningWorkspaceLastCacheHit = false
+        tuningIniCompatibilityCacheKey = ""
+        tuningIniCompatibilityCache = null
+    }
+
+    private fun tuningSemanticCacheKey(snapshot: TuneSnapshot, generation: Long): String =
+        buildString {
+            append(generation).append('|')
+            append(snapshot.profileFingerprint).append('|')
+            append(snapshot.fingerprint)
+        }
+
+    private fun adoptVerifiedTuningSnapshot(snapshot: TuneSnapshot) {
+        val previous = latestTuneSnapshot
+        val semanticIdentityUnchanged = previous != null &&
+            previous.generation == snapshot.generation &&
+            previous.profileFingerprint.equals(snapshot.profileFingerprint, ignoreCase = true) &&
+            previous.fingerprint.equals(snapshot.fingerprint, ignoreCase = true)
+        tuneSnapshotPreviousFingerprint = previous?.fingerprint.orEmpty()
+        tuneSnapshotMatchesPrevious = previous?.fingerprint?.equals(snapshot.fingerprint, ignoreCase = true)
+        latestTuneSnapshot = snapshot
+        tuneSnapshotStatus = "success"
+        tuneSnapshotError = ""
+        tuneSnapshotProfileFingerprint = snapshot.profileFingerprint
+        tuneSnapshotFingerprint = snapshot.fingerprint
+        tuneSnapshotGeneration = snapshot.generation
+        tuneSnapshotTotalBytes = snapshot.totalBytes
+        tuneSnapshotCapturedAtEpochMs = snapshot.capturedAtEpochMs
+        tuneSnapshotComparisonJson = ""
+        if (!semanticIdentityUnchanged) invalidateTuningWorkspaceCache()
+    }
 
     fun start() {
         if (!active.compareAndSet(false, true)) return
@@ -435,11 +531,6 @@ class UsbEcuManager(
     private fun discoverAndConnect(generation: Long) {
         if (!active.get() || !generationAuthority.isCurrent(generation)) return
         retryFuture = null
-        val selectedProfile = profile
-        if (selectedProfile == null) {
-            setState(State.NO_PROFILE, "Import mainController.ini", generation)
-            return
-        }
         val attachedDevices = usbManager.deviceList.values.toList()
         val selectedDescriptor = UsbDeviceSelectionPolicy.selectCandidate(
             attachedDevices.map(::selectionDescriptor)
@@ -448,7 +539,7 @@ class UsbEcuManager(
             attachedDevices.firstOrNull { it.deviceId == selected.deviceId }
         }
         if (device == null) {
-            setState(State.WAITING_DEVICE, "Connect supported Mega144H7 with USB OTG", generation)
+            setState(State.WAITING_DEVICE, "Connect EpicEFI/rusEFI USB ECU with USB OTG", generation)
             scheduleRetry(2000, generation)
             return
         }
@@ -502,7 +593,7 @@ class UsbEcuManager(
     }
 
     private fun connect(device: UsbDevice, generation: Long) {
-        val selectedProfile = profile ?: return
+        val selectedProfile = profile
         if (!active.get() || !generationAuthority.isCurrent(generation)) return
 
         retryFuture?.cancel(false)
@@ -578,13 +669,26 @@ class UsbEcuManager(
             workingProbe = spec
             successfulProbeMode = spec.label
             ecuSignature = result.signature
-            signatureMatches = UsbDeviceSelectionPolicy.exactSignatureMatches(
-                expected = selectedProfile.signature,
-                actual = ecuSignature
+            val recognition = EcuRecognitionResult.evaluate(
+                liveSignature = ecuSignature,
+                expectedSignature = selectedProfile?.signature.orEmpty()
             )
+            signatureMatches = if (selectedProfile == null) null else recognition.exactProfileMatch
             callback.onUsbLog(
                 "USB probe success ${spec.label}; signature '$ecuSignature'; response ${result.responseMode}"
             )
+            if (selectedProfile == null) {
+                if (!generationAuthority.isCurrent(generation)) return
+                handshakeStage = "identity_detected_no_profile"
+                lastError = ""
+                val detected = recognition.displayName ?: "EpicEFI/rusEFI ECU"
+                callback.onUsbLog(
+                    "ECU identity detected without INI authority: $detected • '$ecuSignature'"
+                )
+                closeConnection("")
+                setState(State.NO_PROFILE, "Detected $detected • import matching mainController.ini", generation)
+                return
+            }
             if (signatureMatches != true) {
                 if (!generationAuthority.isCurrent(generation)) return
                 handshakeStage = "signature_rejected"
@@ -605,6 +709,7 @@ class UsbEcuManager(
             try {
                 streamEnvelopeReaderConfirmed = false
                 runFramedProtocolPreflight(selectedProfile, generation)
+                runTuneSnapshotRead(selectedProfile, generation)
                 handshakeStage = "first_output_request"
                 val firstBlock = readOutputBlock(selectedProfile)
                 if (!generationAuthority.isCurrent(generation)) return
@@ -614,7 +719,7 @@ class UsbEcuManager(
                 handshakeStage = "streaming"
                 setState(
                     State.STREAMING,
-                    if (signatureMatches == false) "Streaming • INI signature mismatch" else "Streaming read-only",
+                    if (signatureMatches == false) "Streaming • INI signature mismatch" else "Streaming • live telemetry / tuning ready",
                     generation
                 )
                 pollLoop(generation)
@@ -877,6 +982,98 @@ class UsbEcuManager(
         }
     }
 
+    /**
+     * T1 proof path: read every calibration byte described by the exact imported profile using
+     * bounded read-only R requests. Failure invalidates only the candidate snapshot; ordinary
+     * output-channel streaming is still allowed to continue.
+     */
+    private fun runTuneSnapshotRead(selectedProfile: UsbTunerStudioProfile, generation: Long) {
+        resetTuneSnapshot(clearPrevious = false)
+        tuneSnapshotGeneration = generation
+        tuneSnapshotStatus = "running"
+        val started = SystemClock.elapsedRealtime()
+        try {
+            val plan = TuneSnapshotReadPlanner.build(selectedProfile)
+            tuneSnapshotProfileFingerprint = plan.profileFingerprint
+            tuneSnapshotTotalBytes = plan.totalBytes
+            tuneSnapshotChunksTotal = plan.totalChunks
+            handshakeStage = "t1_tune_snapshot"
+            setState(State.HANDSHAKE, "T1 read-only TuneSnapshot • ${plan.totalBytes} bytes", generation)
+
+            val pageBuffers = selectedProfile.tunePages.associate { page -> page.pageNumber to ByteArray(page.size) }
+            for ((index, chunk) in plan.chunks.withIndex()) {
+                if (!generationAuthority.isCurrent(generation)) return
+                val frame = envelope(chunk.payload)
+                requests.incrementAndGet()
+                strictWriteFrame(
+                    frame,
+                    "T1 R page=${chunk.pageIdentifier} offset=${chunk.offset} count=${chunk.count}",
+                    logSuccess = false
+                )
+                val body = readEnvelope(chunk.count + 8)
+                val data = UsbTuneReadCodec.extractData(body, chunk.count)
+                require(data.size == chunk.count) {
+                    "T1 page ${chunk.pageNumber} chunk ${chunk.offset} returned ${data.size}/${chunk.count} bytes"
+                }
+                val destination = pageBuffers[chunk.pageNumber]
+                    ?: throw IllegalStateException("T1 page ${chunk.pageNumber} buffer missing")
+                data.copyInto(destination, destinationOffset = chunk.offset)
+                tuneSnapshotChunksRead = index + 1
+            }
+            if (!generationAuthority.isCurrent(generation)) return
+
+            val pageImages = selectedProfile.tunePages.sortedBy { it.pageNumber }.map { page ->
+                val bytes = pageBuffers[page.pageNumber]
+                    ?: throw IllegalStateException("T1 page ${page.pageNumber} buffer missing after read")
+                TunePageSnapshot(page.pageNumber, page.identifier, page.size, page.readCommand, bytes)
+            }
+            val snapshot = TuneSnapshot.create(
+                ecuSignature = ecuSignature,
+                profileFingerprint = plan.profileFingerprint,
+                pages = pageImages,
+                generation = generation,
+                capturedAtEpochMs = System.currentTimeMillis()
+            )
+            val previous = latestTuneSnapshot
+            tuneSnapshotPreviousFingerprint = previous?.fingerprint ?: ""
+            if (previous != null) {
+                val comparison = previous.compare(snapshot)
+                tuneSnapshotMatchesPrevious = comparison.identityMatches && comparison.tuneMatches
+                tuneSnapshotComparisonJson = JSONObject()
+                    .put("identityMatches", comparison.identityMatches)
+                    .put("tuneMatches", comparison.tuneMatches)
+                    .put("pageDiffs", JSONArray().also { array ->
+                        comparison.pageDiffs.forEach { diff ->
+                            array.put(JSONObject()
+                                .put("pageNumber", diff.pageNumber)
+                                .put("identifier", diff.identifier)
+                                .put("changedBytes", diff.changedBytes)
+                                .put("firstChangedOffset", diff.firstChangedOffset)
+                                .put("lastChangedOffset", diff.lastChangedOffset))
+                        }
+                    })
+                    .toString()
+            }
+
+            latestTuneSnapshot = snapshot
+            tuneSnapshotFingerprint = snapshot.fingerprint
+            tuneSnapshotCapturedAtEpochMs = snapshot.capturedAtEpochMs
+            tuneSnapshotElapsedMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
+            tuneSnapshotStatus = "success"
+            callback.onUsbLog(
+                "T1 TuneSnapshot passed: pages=${snapshot.pages.size} bytes=${snapshot.totalBytes} " +
+                    "fingerprint=${snapshot.fingerprint} previousMatch=${tuneSnapshotMatchesPrevious ?: "n/a"}"
+            )
+        } catch (error: Exception) {
+            if (!generationAuthority.isCurrent(generation)) return
+            tuneSnapshotElapsedMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
+            tuneSnapshotStatus = "failed"
+            tuneSnapshotError = (error.message ?: "Unknown TuneSnapshot read error").take(240)
+            protocolErrors.incrementAndGet()
+            callback.onUsbLog("T1 TuneSnapshot failed non-fatally: $tuneSnapshotError")
+        }
+    }
+
     private data class StrictWriteResult(
         val requested: Int,
         val written: Int,
@@ -1015,32 +1212,12 @@ class UsbEcuManager(
             }
             if (selected != null) decoded[spec.key] = selected
         }
-        // Keep a tiny, direct TPS truth path for development diagnostics. These internal keys are
-        // not user channels and are never written back to the ECU. They let the report distinguish
-        // raw output bytes, profile decoding, canonical mapping and painted UI values.
-        val tpsChannel = selectedProfile.channels.firstOrNull { it.name.equals("TPSValue", ignoreCase = true) }
-        if (tpsChannel != null) {
-            tpsChannel.rawNumeric(block)?.toFloat()?.takeIf { it.isFinite() }?.let { decoded["_traceTpsRawNumeric"] = it }
-            tpsChannel.rawBytes(block)?.let { raw ->
-                if (raw.isNotEmpty()) decoded["_traceTpsByte0"] = (raw[0].toInt() and 0xff).toFloat()
-                if (raw.size > 1) decoded["_traceTpsByte1"] = (raw[1].toInt() and 0xff).toFloat()
-            }
-            tpsChannel.decode(block)?.toFloat()?.takeIf { it.isFinite() }?.let { decoded["_traceTpsDecoded"] = it }
-            decoded["_traceTpsOffset"] = tpsChannel.offset.toFloat()
-            decoded["_traceTpsScale"] = tpsChannel.scale.toFloat()
-        }
-        listOf("TPSValue", "rawTps1Primary", "tpsADC", "throttlePedalPosition", "DriverThrottleIntent").forEach { name ->
-            if (!decoded.containsKey(name)) {
-                selectedProfile.channels.firstOrNull { it.name.equals(name, ignoreCase = true) }
-                    ?.decode(block)?.toFloat()?.takeIf { it.isFinite() }
-                    ?.let { decoded[name] = it }
-            }
-        }
         PerformanceMetrics.timingUs("canonicalMap", System.nanoTime() - canonicalStartedNs)
 
         val published = generationAuthority.runIfCurrent(generation) {
             latestOutputBlock = block
             latestOutputBlockElapsedMs = now
+            latestOutputBlockGeneration = generation
             lastPacketElapsedMs = now
             frames.incrementAndGet()
             measuredHz = rawFrameRate.recordCompletedFrame(lastPacketElapsedMs)
@@ -1134,12 +1311,8 @@ class UsbEcuManager(
         .toString(Charsets.ISO_8859_1)
         .trim()
 
-    private fun isLikelySignature(value: String): Boolean {
-        if (value.length !in 7..240) return false
-        val printable = value.count { it.code in 32..126 }
-        return printable >= value.length * 0.9 &&
-            (value.contains("rusEFI", true) || value.contains("EpicEFI", true) || value.contains("MEGA144", true))
-    }
+    private fun isLikelySignature(value: String): Boolean =
+        EcuFirmwareIdentity.parse(value) != null
 
     private fun envelope(payload: ByteArray): ByteArray {
         val crc = CRC32().apply { update(payload) }.value
@@ -1161,7 +1334,7 @@ class UsbEcuManager(
      * the entire response while parsing the two-byte length from the buffered data.
      */
     private fun readEnvelope(maxBody: Int): ByteArray =
-        if (performanceProfile.optimizedUsbBuffers) readEnvelopeOptimized(maxBody) else readEnvelopeLegacy(maxBody)
+        readEnvelopeOptimized(maxBody)
 
     private fun readEnvelopeOptimized(maxBody: Int): ByteArray {
         val conn = connection ?: throw IllegalStateException("USB connection closed")
@@ -1221,74 +1394,6 @@ class UsbEcuManager(
         PerformanceMetrics.sample("usbReadsPerEnvelope", readCount.toLong())
         PerformanceMetrics.sample("usbEnvelopeBytes", expectedPacketSize.toLong())
         return optimizedPacketBuffer.copyOfRange(2, 2 + bodyLength)
-    }
-
-    private fun readEnvelopeLegacy(maxBody: Int): ByteArray {
-        val conn = connection ?: throw IllegalStateException("USB connection closed")
-        val endpoint = endpointIn ?: throw IllegalStateException("USB IN endpoint missing")
-        val raw = ByteArrayOutputStream()
-        val deadline = SystemClock.elapsedRealtime() + ENVELOPE_READ_TIMEOUT_MS
-        val chunkSizes = mutableListOf<Int>()
-        var expectedPacketSize = -1
-        var bodyLength = -1
-
-        while (SystemClock.elapsedRealtime() < deadline) {
-            if (expectedPacketSize > 0 && raw.size() >= expectedPacketSize) break
-
-            // Always request at least one full USB max packet. A tiny 2-byte IN transfer was the
-            // only meaningful difference between the successful v0.11.3 probes and failed stream.
-            val receiveSize = maxOf(USB_RX_BUFFER_BYTES, endpoint.maxPacketSize.coerceAtLeast(1))
-            val buffer = ByteArray(receiveSize)
-            val got = conn.bulkTransfer(endpoint, buffer, buffer.size, BULK_READ_SLICE_MS)
-            if (got <= 0) continue
-
-            raw.write(buffer, 0, got)
-            bytesRx.addAndGet(got.toLong())
-            chunkSizes += got
-
-            if (bodyLength < 0 && raw.size() >= 2) {
-                val bytes = raw.toByteArray()
-                bodyLength = ((bytes[0].toInt() and 0xff) shl 8) or (bytes[1].toInt() and 0xff)
-                if (bodyLength !in 1..maxBody.coerceAtLeast(64)) {
-                    protocolErrors.incrementAndGet()
-                    throw IllegalStateException("Invalid USB response length $bodyLength")
-                }
-                expectedPacketSize = bodyLength + 6
-            }
-        }
-
-        val packet = raw.toByteArray()
-        if (bodyLength < 0) {
-            throw IllegalStateException("USB envelope header timeout ${packet.size}/2 bytes")
-        }
-        if (packet.size < expectedPacketSize) {
-            throw IllegalStateException("USB envelope timeout ${packet.size}/$expectedPacketSize bytes")
-        }
-        if (packet.size > expectedPacketSize) {
-            callback.onUsbLog(
-                "Buffered USB RX envelope has ${packet.size - expectedPacketSize} trailing byte(s)"
-            )
-        }
-
-        val body = packet.copyOfRange(2, 2 + bodyLength)
-        val expected = ByteBuffer.wrap(packet, 2 + bodyLength, 4)
-            .order(ByteOrder.BIG_ENDIAN)
-            .int.toLong() and 0xffffffffL
-        val actual = CRC32().apply { update(body) }.value
-        if (actual != expected) {
-            crcErrors.incrementAndGet()
-            throw IllegalStateException("USB CRC mismatch")
-        }
-
-        if (!streamEnvelopeReaderConfirmed) {
-            streamEnvelopeReaderConfirmed = true
-            callback.onUsbLog(
-                "Buffered USB RX envelope confirmed: body=$bodyLength, total=$expectedPacketSize, " +
-                    "reads=${chunkSizes.size}, chunks=${chunkSizes.joinToString("+")}, " +
-                    "buffer=${maxOf(USB_RX_BUFFER_BYTES, endpoint.maxPacketSize.coerceAtLeast(1))}"
-            )
-        }
-        return body
     }
 
     private fun writeFully(bytes: ByteArray) {
@@ -1476,9 +1581,28 @@ class UsbEcuManager(
         selectedEndpointOutMaxPacket = pipe.output.maxPacketSize
     }
 
+    private fun resetTuneSnapshot(clearPrevious: Boolean) {
+        tuneSnapshotStatus = "not_run"
+        tuneSnapshotError = ""
+        tuneSnapshotProfileFingerprint = ""
+        tuneSnapshotFingerprint = ""
+        tuneSnapshotPreviousFingerprint = ""
+        tuneSnapshotMatchesPrevious = null
+        tuneSnapshotGeneration = -1L
+        tuneSnapshotTotalBytes = 0
+        tuneSnapshotChunksRead = 0
+        tuneSnapshotChunksTotal = 0
+        tuneSnapshotElapsedMs = 0L
+        tuneSnapshotCapturedAtEpochMs = 0L
+        tuneSnapshotComparisonJson = ""
+        invalidateTuningWorkspaceCache()
+        if (clearPrevious) latestTuneSnapshot = null
+    }
+
     private fun resetProbeDiagnostics() {
         synchronized(probeLock) { probeAttempts.clear() }
         synchronized(protocolProbeLock) { protocolProbeAttempts.clear() }
+        resetTuneSnapshot(clearPrevious = false)
         setLineCodingResult = Int.MIN_VALUE
         setControlLineStateResult = Int.MIN_VALUE
         successfulProbeMode = ""
@@ -1598,6 +1722,7 @@ class UsbEcuManager(
     private fun invalidateGeneration(): Long = advanceGeneration()
 
     private fun advanceGeneration(): Long {
+        latestOutputBlockGeneration = -1L
         return permissionRequestCoordinator.advanceGeneration()
     }
 
@@ -1611,10 +1736,13 @@ class UsbEcuManager(
             } else {
                 -1L
             }
+            val operationOwner = exclusiveOperationOwner.get()
             JSONObject()
                 .put("usbSessionId", generation)
                 .put("streaming", active.get() && state == State.STREAMING)
                 .put("packetAgeMs", packetAgeMs)
+                .put("exclusiveOperation", operationOwner != null)
+                .put("exclusiveOperationOwner", operationOwner?.diagnosticName ?: "")
                 .put("activeSessionFrames", rawFrameRate.frameCount)
         }
     }
@@ -1655,6 +1783,754 @@ class UsbEcuManager(
     }
     private fun hexByte(value: Int): String = String.format(Locale.US, "0x%02X", value and 0xff)
 
+    private fun finiteOrNull(value: Double): Any = if (value.isFinite()) value else JSONObject.NULL
+
+    /**
+     * T4 read-only tuning workspace. The caller cannot supply profile/page/offset/raw-byte data;
+     * all storage metadata remains manager-owned and comes from the current imported INI.
+     */
+    private fun requireNormalTuningAvailable(allowUncertain: Boolean = false) {
+        val legacyT3Recovery = t3RecoveryStore.load()
+        require(legacyT3Recovery.state == T3RecoveryStoreState.ABSENT) {
+            "Legacy T3 recovery marker requires manual resolution before normal tuning"
+        }
+        val legacyT6Recovery = t6RecoveryStore.load()
+        require(legacyT6Recovery.state == T6RecoveryStoreState.ABSENT) {
+            "Legacy T6 recovery marker requires manual resolution before normal tuning"
+        }
+        require(exclusiveOperationOwner.get() == null) { "Another tuning read/write/save operation is already running" }
+        if (!allowUncertain) {
+            require(!tuningWriteUncertain) { "Previous tuning transport is uncertain; Read ECU before another write/save" }
+        }
+    }
+
+    private fun currentNormalTuningProfileAndSnapshot(): Pair<UsbTunerStudioProfile, TuneSnapshot> {
+        val generation = generationAuthority.current()
+        require(generation > 0L && active.get() && state == State.STREAMING && generationAuthority.isCurrent(generation)) {
+            "USB must be streaming for normal tuning"
+        }
+        val selectedProfile = profile ?: throw IllegalStateException("Import a matching mainController.ini")
+        require(signatureMatches == true && ecuSignature == selectedProfile.signature) {
+            "Live ECU signature does not match the imported INI"
+        }
+        val snapshot = latestTuneSnapshot ?: throw IllegalStateException("A complete TuneSnapshot is not available")
+        require(snapshot.generation == generation) { "TuneSnapshot belongs to another USB generation" }
+        require(snapshot.ecuSignature == ecuSignature) { "TuneSnapshot ECU signature changed" }
+        require(snapshot.profileFingerprint.equals(selectedProfile.tuneProfileFingerprint(), ignoreCase = true)) {
+            "TuneSnapshot profile identity changed"
+        }
+        return selectedProfile to snapshot
+    }
+
+    private fun readNormalTuningSnapshotOnOwner(
+        selectedProfile: UsbTunerStudioProfile,
+        generation: Long,
+        tuneFingerprint: String
+    ): TuneSnapshot {
+        require(Thread.currentThread() === usbOwnerThread) { "Tune read is not on the native USB owner thread" }
+        require(active.get() && state == State.STREAMING && generationAuthority.isCurrent(generation)) {
+            "USB generation changed during tune read"
+        }
+        val context = TuningContext(
+            sessionId = generation,
+            generation = generation,
+            source = TuningDataSource.LIVE,
+            ecuSignature = ecuSignature,
+            profileFingerprint = selectedProfile.tuneProfileFingerprint(),
+            tuneFingerprint = tuneFingerprint
+        )
+        val reader = AuthoritativeTuneSnapshotReader(selectedProfile, context)
+        return reader.read(System.currentTimeMillis()) { payload, maxResponseBody, label ->
+            require(generationAuthority.isCurrent(generation)) { "USB generation changed during TuneSnapshot read" }
+            requests.incrementAndGet()
+            strictWriteFrame(envelope(payload), label.replace("TuneSnapshot", "Tuner read"), logSuccess = false)
+            readEnvelope(maxResponseBody)
+        }.also {
+            require(generationAuthority.isCurrent(generation)) { "USB generation changed after TuneSnapshot read" }
+        }
+    }
+
+    internal fun queueTuningRead(onComplete: () -> Unit): JSONObject {
+        requireNormalTuningAvailable(allowUncertain = true)
+        val (selectedProfile, snapshot) = currentNormalTuningProfileAndSnapshot()
+        val generation = generationAuthority.current()
+        acquireUsbOperation(UsbOperationOwner.TUNER)
+        tuningWriteStatus = "read_queued"
+        tuningWriteDetail = "Complete ECU tune read queued"
+        try {
+            executor.execute {
+                var detail = ""
+                try {
+                    require(Thread.currentThread() === usbOwnerThread) { "Tune read is not on the native USB owner thread" }
+                    require(generationAuthority.isCurrent(generation) && active.get() && state == State.STREAMING) {
+                        "USB generation changed before tune read"
+                    }
+                    val liveProfile = profile ?: throw IllegalStateException("Imported INI unavailable")
+                    require(liveProfile.tuneProfileFingerprint().equals(selectedProfile.tuneProfileFingerprint(), ignoreCase = true)) {
+                        "Imported INI changed before tune read"
+                    }
+                    loopFuture?.cancel(false)
+                    loopFuture = null
+                    tuningWriteStatus = "reading"
+                    val readStartedAt = SystemClock.elapsedRealtime()
+                    val fresh = readNormalTuningSnapshotOnOwner(liveProfile, generation, snapshot.fingerprint)
+                    tuningLastReadElapsedMs = (SystemClock.elapsedRealtime() - readStartedAt).coerceAtLeast(0L)
+                    adoptVerifiedTuningSnapshot(fresh)
+                    tuningLastReadFingerprint = fresh.fingerprint
+                    tuningWriteUncertain = false
+                    tuningWriteStatus = "read_complete"
+                    detail = "Read ${fresh.totalBytes} calibration bytes in ${tuningLastReadElapsedMs} ms; tune ${fresh.fingerprint.take(12)}"
+                    tuningWriteDetail = detail
+                    callback.onUsbLog("Tuner read complete: fingerprint=${fresh.fingerprint} bytes=${fresh.totalBytes} elapsedMs=${tuningLastReadElapsedMs}")
+                } catch (error: Exception) {
+                    detail = (error.message ?: error.javaClass.simpleName).take(240)
+                    tuningWriteStatus = "read_failed"
+                    tuningWriteDetail = detail
+                    callback.onUsbLog("Tuner read failed: $detail")
+                } finally {
+                    releaseUsbOperation(UsbOperationOwner.TUNER)
+                    if (active.get() && state == State.STREAMING && generationAuthority.isCurrent(generation)) {
+                        pollLoop(generation)
+                    }
+                    onComplete()
+                }
+            }
+        } catch (error: Exception) {
+            releaseUsbOperation(UsbOperationOwner.TUNER)
+            tuningWriteStatus = "read_failed"
+            tuningWriteDetail = (error.message ?: error.javaClass.simpleName).take(240)
+            throw error
+        }
+        return JSONObject()
+            .put("status", "queued")
+            .put("capability", "LIVE_TUNING_READ")
+            .put("generation", generation)
+            .put("tuneFingerprint", snapshot.fingerprint)
+    }
+
+    internal fun queueTuningWriteBatchJson(json: String, onComplete: () -> Unit): JSONObject {
+        requireNormalTuningAvailable()
+        val (selectedProfile, snapshot) = currentNormalTuningProfileAndSnapshot()
+        val generation = generationAuthority.current()
+        val semanticEnvelope = SemanticTuningWriteEnvelope.parse(json)
+        val plan = TuningWritePlanner.plan(selectedProfile, snapshot, semanticEnvelope, generation)
+        acquireUsbOperation(UsbOperationOwner.TUNER)
+
+        tuningWriteStatus = "write_queued"
+        tuningWriteDetail = "${plan.operations.size} semantic change(s) queued"
+        tuningLastWriteResult = null
+        try {
+            executor.execute {
+                var possibleTransmission = false
+                var detail = ""
+                try {
+                    require(Thread.currentThread() === usbOwnerThread) { "Tune write is not on the native USB owner thread" }
+                    require(active.get() && state == State.STREAMING && generationAuthority.isCurrent(generation)) {
+                        "USB generation changed before tune write"
+                    }
+                    val liveProfile = profile ?: throw IllegalStateException("Imported INI unavailable")
+                    require(liveProfile.tuneProfileFingerprint().equals(plan.profileFingerprint, ignoreCase = true)) {
+                        "Imported INI changed before tune write"
+                    }
+                    loopFuture?.cancel(false)
+                    loopFuture = null
+                    tuningWriteStatus = "write_preflight"
+
+                    val freshBaseline = readNormalTuningSnapshotOnOwner(
+                        liveProfile,
+                        generation,
+                        plan.baselineTuneFingerprint
+                    )
+                    require(freshBaseline.fingerprint.equals(plan.baselineTuneFingerprint, ignoreCase = true)) {
+                        "ECU tune changed after edit; Read ECU and review changes again"
+                    }
+
+                    tuningWriteStatus = "writing_ram"
+                    plan.operations.forEachIndexed { index, operation ->
+                        require(generationAuthority.isCurrent(generation)) {
+                            "USB generation changed before ${operation.semanticLabel}"
+                        }
+                        val writeBody = TuningWriteProtocol.writeBody(operation)
+                        requests.incrementAndGet()
+                        strictWriteFrame(
+                            envelope(writeBody),
+                            "Tuner C ${index + 1}/${plan.operations.size} ${operation.semanticLabel}",
+                            logSuccess = true
+                        )
+                        possibleTransmission = true
+                        val ack = readEnvelope(1)
+                        TuningWriteProtocol.requireWriteAck(ack)
+
+                        val readBody = TuningWriteProtocol.readBackBody(operation)
+                        requests.incrementAndGet()
+                        strictWriteFrame(
+                            envelope(readBody),
+                            "Tuner R ${index + 1}/${plan.operations.size} ${operation.semanticLabel}",
+                            logSuccess = false
+                        )
+                        val readBack = readEnvelope(operation.byteSize + 1)
+                        TuningWriteProtocol.requireReadBack(readBack, operation)
+                    }
+
+                    tuningWriteStatus = "verifying_full_tune"
+                    val observed = readNormalTuningSnapshotOnOwner(
+                        liveProfile,
+                        generation,
+                        plan.expectedSnapshot.fingerprint
+                    )
+                    val comparison = plan.expectedSnapshot.compare(observed)
+                    require(comparison.identityMatches && comparison.tuneMatches) {
+                        "Full TuneSnapshot after write differs from the exact expected tune"
+                    }
+
+                    adoptVerifiedTuningSnapshot(observed)
+                    synchronized(tuningDirtyPageLock) {
+                        tuningDirtyPageNumbers.addAll(plan.dirtyPageNumbers)
+                    }
+                    tuningWriteUncertain = false
+                    tuningWriteStatus = "ram_applied_verified"
+                    detail = "Applied ${plan.operations.size} change(s), ${plan.changedBytes} changed byte(s); full tune verified"
+                    val result = TuningWriteBatchResult(
+                        status = tuningWriteStatus,
+                        generation = generation,
+                        baselineTuneFingerprint = plan.baselineTuneFingerprint,
+                        verifiedTuneFingerprint = observed.fingerprint,
+                        changeCount = plan.operations.size,
+                        changedBytes = plan.changedBytes,
+                        dirtyPageCount = synchronized(tuningDirtyPageLock) { tuningDirtyPageNumbers.size },
+                        detail = detail
+                    )
+                    tuningLastWriteResult = result
+                    tuningWriteDetail = detail
+                    callback.onUsbLog(
+                        "Tuner RAM write verified: changes=${plan.operations.size} changedBytes=${plan.changedBytes} " +
+                            "fingerprint=${observed.fingerprint} dirtyPages=${plan.dirtyPageNumbers.sorted()}"
+                    )
+                } catch (error: Exception) {
+                    detail = (error.message ?: error.javaClass.simpleName).take(240)
+                    if (possibleTransmission) {
+                        synchronized(tuningDirtyPageLock) {
+                            tuningDirtyPageNumbers.addAll(plan.dirtyPageNumbers)
+                        }
+                        tuningWriteUncertain = true
+                        tuningWriteStatus = "write_uncertain"
+                    } else {
+                        tuningWriteStatus = "write_failed"
+                    }
+                    tuningWriteDetail = detail
+                    tuningLastWriteResult = TuningWriteBatchResult(
+                        status = tuningWriteStatus,
+                        generation = generation,
+                        baselineTuneFingerprint = plan.baselineTuneFingerprint,
+                        verifiedTuneFingerprint = null,
+                        changeCount = plan.operations.size,
+                        changedBytes = plan.changedBytes,
+                        dirtyPageCount = synchronized(tuningDirtyPageLock) { tuningDirtyPageNumbers.size },
+                        detail = detail
+                    )
+                    callback.onUsbLog("Tuner RAM write stopped: status=$tuningWriteStatus • $detail")
+                } finally {
+                    releaseUsbOperation(UsbOperationOwner.TUNER)
+                    if (active.get() && state == State.STREAMING && generationAuthority.isCurrent(generation)) {
+                        pollLoop(generation)
+                    }
+                    onComplete()
+                }
+            }
+        } catch (error: Exception) {
+            releaseUsbOperation(UsbOperationOwner.TUNER)
+            tuningWriteStatus = "write_failed"
+            tuningWriteDetail = (error.message ?: error.javaClass.simpleName).take(240)
+            throw error
+        }
+        return plan.queuedJson()
+    }
+
+    internal fun queueTuningBurn(onComplete: () -> Unit): JSONObject {
+        requireNormalTuningAvailable()
+        val (selectedProfile, snapshot) = currentNormalTuningProfileAndSnapshot()
+        val generation = generationAuthority.current()
+        acquireUsbOperation(UsbOperationOwner.TUNER)
+        val explicitlyDirty = synchronized(tuningDirtyPageLock) { tuningDirtyPageNumbers.toSet() }
+        tuningWriteStatus = "save_queued"
+        tuningWriteDetail = "ECU Save/Burn queued"
+        tuningLastBurnResult = null
+
+        try {
+            executor.execute {
+                var burnTransmission = false
+                var pagesCompleted = 0
+                var requestedWriteId: Long? = null
+                var requestedBurnCount: Int? = null
+                var pagesToBurn: List<UsbTunePage> = emptyList()
+                var detail = ""
+                try {
+                    require(Thread.currentThread() === usbOwnerThread) { "Tune save is not on the native USB owner thread" }
+                    require(active.get() && state == State.STREAMING && generationAuthority.isCurrent(generation)) {
+                        "USB generation changed before ECU Save/Burn"
+                    }
+                    val liveProfile = profile ?: throw IllegalStateException("Imported INI unavailable")
+                    val profileFingerprint = liveProfile.tuneProfileFingerprint()
+                    require(profileFingerprint.equals(selectedProfile.tuneProfileFingerprint(), ignoreCase = true)) {
+                        "Imported INI changed before ECU Save/Burn"
+                    }
+                    val liveSnapshot = latestTuneSnapshot ?: throw IllegalStateException("Current TuneSnapshot unavailable")
+                    require(liveSnapshot.generation == generation && liveSnapshot.fingerprint == snapshot.fingerprint) {
+                        "Current tune changed before ECU Save/Burn"
+                    }
+
+                    loopFuture?.cancel(false)
+                    loopFuture = null
+                    tuningWriteStatus = "save_preflight"
+
+                    fun contextForCurrentTune(): TuningContext = TuningContext(
+                        sessionId = generation,
+                        generation = generation,
+                        source = TuningDataSource.LIVE,
+                        ecuSignature = ecuSignature,
+                        profileFingerprint = profileFingerprint,
+                        tuneFingerprint = liveSnapshot.fingerprint
+                    )
+                    fun readFlashStatus(): TuneFlashStatus {
+                        require(generationAuthority.isCurrent(generation)) { "USB generation changed during ECU Save/Burn" }
+                        val output = readOutputBlock(liveProfile)
+                        val now = SystemClock.elapsedRealtime()
+                        return TuneFlashStatusResolver(NORMAL_TUNING_STATUS_MAX_AGE_MS).resolve(
+                            profile = liveProfile,
+                            context = contextForCurrentTune(),
+                            sample = NativeOutputSample(output, generation, now),
+                            nowElapsedMs = now
+                        )
+                    }
+
+                    val initialStatus = readFlashStatus()
+                    TuneBurnEvidencePolicy.requireReadyForBurn(initialStatus)
+                    val supportedPages = liveProfile.tunePages.filter {
+                        it.burnCommand == TuneBurnProtocol.SUPPORTED_BURN_COMMAND
+                    }
+                    require(supportedPages.isNotEmpty()) { "Current INI exposes no supported B%2i tune pages" }
+
+                    val requestedPageNumbers = if (explicitlyDirty.isNotEmpty()) {
+                        explicitlyDirty
+                    } else if (initialStatus.needFlashBurn) {
+                        supportedPages.mapTo(linkedSetOf()) { it.pageNumber }
+                    } else {
+                        emptySet()
+                    }
+                    pagesToBurn = supportedPages.filter { it.pageNumber in requestedPageNumbers }.sortedBy { it.pageNumber }
+                    require(requestedPageNumbers.all { page -> pagesToBurn.any { it.pageNumber == page } }) {
+                        "A dirty tune page has no supported current-INI burn command"
+                    }
+
+                    if (pagesToBurn.isEmpty()) {
+                        tuningWriteStatus = "save_not_needed"
+                        detail = "ECU reports no unsaved calibration changes"
+                        tuningWriteDetail = detail
+                        tuningLastBurnResult = TuningBurnResult(
+                            status = tuningWriteStatus,
+                            generation = generation,
+                            tuneFingerprint = liveSnapshot.fingerprint,
+                            pagesRequested = 0,
+                            pagesCompleted = 0,
+                            requestedTuneWriteId = null,
+                            burnRequestCnt = null,
+                            detail = detail
+                        )
+                    } else {
+                        tuningWriteStatus = "saving"
+                        pagesToBurn.forEachIndexed { index, page ->
+                            val baseline = readFlashStatus()
+                            TuneBurnEvidencePolicy.requireReadyForBurn(baseline)
+
+                            val body = TuneBurnProtocol.buildBody(page)
+                            requests.incrementAndGet()
+                            strictWriteFrame(
+                                envelope(body),
+                                "Tuner B ${index + 1}/${pagesToBurn.size} page=${page.pageNumber}",
+                                logSuccess = true
+                            )
+                            burnTransmission = true
+                            val ack = readEnvelope(1)
+                            TuneBurnProtocol.requireAcceptedAck(ack)
+
+                            var progress: TuneBurnProgress? = null
+                            val deadline = SystemClock.elapsedRealtime() + NORMAL_TUNING_BURN_TIMEOUT_MS
+                            while (SystemClock.elapsedRealtime() < deadline) {
+                                SystemClock.sleep(NORMAL_TUNING_BURN_POLL_MS)
+                                val current = readFlashStatus()
+                                if (progress == null) {
+                                    if (TuneBurnEvidencePolicy.requestHasStarted(baseline, current)) {
+                                        progress = TuneBurnEvidencePolicy.observeRequest(baseline, current)
+                                        requestedWriteId = progress.requestedTuneWriteId
+                                        requestedBurnCount = progress.expectedBurnRequestCnt
+                                        if (!current.flashWritePending) {
+                                            progress = TuneBurnEvidencePolicy.observeCompletion(progress, current)
+                                            break
+                                        }
+                                    }
+                                } else if (!current.flashWritePending) {
+                                    progress = TuneBurnEvidencePolicy.observeCompletion(progress, current)
+                                    break
+                                }
+                            }
+                            require(progress != null && !progress.latest.flashWritePending) {
+                                "ECU Save/Burn did not complete before timeout"
+                            }
+                            pagesCompleted++
+                        }
+
+                        tuningWriteStatus = "verifying_saved_tune"
+                        val reread = readNormalTuningSnapshotOnOwner(
+                            liveProfile,
+                            generation,
+                            liveSnapshot.fingerprint
+                        )
+                        require(reread.fingerprint.equals(liveSnapshot.fingerprint, ignoreCase = true)) {
+                            "Tune contents changed unexpectedly during ECU Save/Burn"
+                        }
+                        val finalStatus = readFlashStatus()
+                        require(!finalStatus.flashWritePending) { "Flash write is still pending after ECU Save/Burn" }
+                        require(!finalStatus.needFlashBurn) { "ECU still reports unsaved calibration after Save/Burn" }
+
+                        adoptVerifiedTuningSnapshot(reread)
+                        synchronized(tuningDirtyPageLock) {
+                            pagesToBurn.forEach { tuningDirtyPageNumbers.remove(it.pageNumber) }
+                        }
+                        tuningWriteUncertain = false
+                        tuningWriteStatus = "saved"
+                        detail = "Saved $pagesCompleted tune page(s) to ECU flash; full tune verified"
+                        tuningWriteDetail = detail
+                        tuningLastBurnResult = TuningBurnResult(
+                            status = tuningWriteStatus,
+                            generation = generation,
+                            tuneFingerprint = reread.fingerprint,
+                            pagesRequested = pagesToBurn.size,
+                            pagesCompleted = pagesCompleted,
+                            requestedTuneWriteId = requestedWriteId,
+                            burnRequestCnt = requestedBurnCount,
+                            detail = detail
+                        )
+                        callback.onUsbLog(
+                            "Tuner Save/Burn complete: pages=${pagesToBurn.map { it.pageNumber }} " +
+                                "fingerprint=${reread.fingerprint} tuneWriteId=$requestedWriteId"
+                        )
+                    }
+                } catch (error: Exception) {
+                    detail = (error.message ?: error.javaClass.simpleName).take(240)
+                    if (burnTransmission) tuningWriteUncertain = true
+                    tuningWriteStatus = if (burnTransmission) "save_uncertain" else "save_failed"
+                    tuningWriteDetail = detail
+                    tuningLastBurnResult = TuningBurnResult(
+                        status = tuningWriteStatus,
+                        generation = generation,
+                        tuneFingerprint = latestTuneSnapshot?.fingerprint,
+                        pagesRequested = pagesToBurn.size,
+                        pagesCompleted = pagesCompleted,
+                        requestedTuneWriteId = requestedWriteId,
+                        burnRequestCnt = requestedBurnCount,
+                        detail = detail
+                    )
+                    callback.onUsbLog("Tuner Save/Burn stopped: status=$tuningWriteStatus • $detail")
+                } finally {
+                    releaseUsbOperation(UsbOperationOwner.TUNER)
+                    if (active.get() && state == State.STREAMING && generationAuthority.isCurrent(generation)) {
+                        pollLoop(generation)
+                    }
+                    onComplete()
+                }
+            }
+        } catch (error: Exception) {
+            releaseUsbOperation(UsbOperationOwner.TUNER)
+            tuningWriteStatus = "save_failed"
+            tuningWriteDetail = (error.message ?: error.javaClass.simpleName).take(240)
+            throw error
+        }
+
+        return JSONObject()
+            .put("status", "queued")
+            .put("capability", "LIVE_TUNING_PERSIST")
+            .put("generation", generation)
+            .put("tuneFingerprint", snapshot.fingerprint)
+            .put("dirtyPageCount", explicitlyDirty.size)
+    }
+
+    internal fun tuningWriteStatusJson(): JSONObject {
+        val dirtyPages = synchronized(tuningDirtyPageLock) { tuningDirtyPageNumbers.toList().sorted() }
+        return JSONObject()
+            .put("status", tuningWriteStatus)
+            .put("capability", "LIVE_TUNING_READ_WRITE")
+            .put("operationRunning", exclusiveOperationOwner.get() == UsbOperationOwner.TUNER)
+            .put("uncertain", tuningWriteUncertain)
+            .put("detail", tuningWriteDetail)
+            .put("generation", generationAuthority.current())
+            .put("currentTuneFingerprint", latestTuneSnapshot?.fingerprint ?: JSONObject.NULL)
+            .put("lastReadFingerprint", tuningLastReadFingerprint.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+            .put("lastReadElapsedMs", tuningLastReadElapsedMs)
+            .put("lastWorkspaceBuildElapsedMs", tuningLastWorkspaceBuildElapsedMs)
+            .put("lastWorkspaceJsonElapsedMs", tuningLastWorkspaceJsonElapsedMs)
+            .put("workspaceCacheLastHit", tuningWorkspaceLastCacheHit)
+            .put("workspaceCacheReuseCount", tuningWorkspaceCacheReuseCount)
+            .put("dirtyPageCount", dirtyPages.size)
+            .put("dirtyPages", JSONArray(dirtyPages))
+            .put("lastWrite", tuningLastWriteResult?.toJson() ?: JSONObject.NULL)
+            .put("lastBurn", tuningLastBurnResult?.toJson() ?: JSONObject.NULL)
+    }
+
+    internal fun iniCompatibilityJson(): JSONObject {
+        val selectedProfile = profile
+            ?: return JSONObject()
+                .put("state", "red")
+                .put("reason", "No usable mainController.ini is imported")
+                .put("importedProfileName", JSONObject.NULL)
+                .put("signatureMatches", JSONObject.NULL)
+
+        val base = JSONObject()
+            .put("importedProfileName", selectedProfile.importedName)
+            .put("profileSignature", selectedProfile.signature)
+            .put("ecuSignature", ecuSignature.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+            .put("signatureMatches", signatureMatches ?: JSONObject.NULL)
+
+        if (!active.get() || state != State.STREAMING) {
+            return base
+                .put("state", "amber")
+                .put("reason", "INI is loaded but live ECU streaming is not current")
+        }
+        if (signatureMatches != true || ecuSignature != selectedProfile.signature) {
+            return base
+                .put("state", "amber")
+                .put("reason", "Imported INI does not match the live ECU signature")
+        }
+
+        val generation = generationAuthority.current()
+        val snapshot = latestTuneSnapshot
+            ?: return base
+                .put("state", "amber")
+                .put("reason", "Matching INI is loaded but a complete current TuneSnapshot is not available")
+        if (generation <= 0L || snapshot.generation != generation || !generationAuthority.isCurrent(generation)) {
+            return base
+                .put("state", "amber")
+                .put("reason", "Matching INI is loaded but the TuneSnapshot belongs to an obsolete USB generation")
+        }
+
+        val compatibilityCacheKey = tuningSemanticCacheKey(snapshot, generation)
+        tuningIniCompatibilityCache
+            ?.takeIf { tuningIniCompatibilityCacheKey == compatibilityCacheKey }
+            ?.let { return it }
+
+        return runCatching {
+            IniConditionAuthority.build(selectedProfile, snapshot).compatibility.toJson()
+                .put("importedProfileName", selectedProfile.importedName)
+                .put("profileSignature", selectedProfile.signature)
+                .put("ecuSignature", ecuSignature)
+                .put("signatureMatches", true)
+                .put("generation", generation)
+                .put("profileFingerprint", selectedProfile.tuneProfileFingerprint())
+                .put("tuneFingerprint", snapshot.fingerprint)
+                .also {
+                    tuningIniCompatibilityCache = it
+                    tuningIniCompatibilityCacheKey = compatibilityCacheKey
+                }
+        }.getOrElse { error ->
+            base
+                .put("state", "amber")
+                .put("reason", (error.message ?: "Unable to evaluate INI compatibility").take(240))
+        }
+    }
+
+    internal fun tuningWorkspaceJson(): JSONObject {
+        val generation = generationAuthority.current()
+        if (generation <= 0L || !active.get() || state != State.STREAMING) {
+            return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "USB must be streaming before the tuning workspace is current")
+                .put("iniCompatibility", iniCompatibilityJson())
+        }
+        val selectedProfile = profile
+            ?: return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "Import a matching mainController.ini")
+                .put("iniCompatibility", iniCompatibilityJson())
+        if (signatureMatches != true || ecuSignature != selectedProfile.signature) {
+            return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "Live ECU signature does not match the imported INI")
+                .put("iniCompatibility", iniCompatibilityJson())
+        }
+        val snapshot = latestTuneSnapshot
+            ?: return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "A complete TuneSnapshot is not available yet")
+                .put("iniCompatibility", iniCompatibilityJson())
+        if (snapshot.generation != generation || !generationAuthority.isCurrent(generation)) {
+            return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "TuneSnapshot belongs to an obsolete USB generation")
+                .put("iniCompatibility", iniCompatibilityJson())
+        }
+        return runCatching {
+            // The semantic workspace is a pure function of live generation + profile identity +
+            // complete tune bytes. A newer verified capture timestamp with the same tune bytes does
+            // not require decoding thousands of fields and rebuilding JSON again.
+            val cacheKey = tuningSemanticCacheKey(snapshot, generation)
+            val cachedWorkspace = tuningWorkspaceCache
+                ?.takeIf { tuningWorkspaceCacheKey == cacheKey }
+            val semanticWorkspace = cachedWorkspace
+                ?: run {
+                    val buildStartedAt = SystemClock.elapsedRealtime()
+                    TuningWorkspaceBuilder.build(selectedProfile, snapshot, generation).also {
+                        tuningLastWorkspaceBuildElapsedMs =
+                            (SystemClock.elapsedRealtime() - buildStartedAt).coerceAtLeast(0L)
+                        tuningWorkspaceCache = it
+                        tuningWorkspaceCacheKey = cacheKey
+                    }
+                }
+            val cachedJson = tuningWorkspaceJsonCache
+                ?.takeIf { tuningWorkspaceJsonCacheKey == cacheKey }
+            val semanticJson = cachedJson
+                ?: run {
+                    val jsonStartedAt = SystemClock.elapsedRealtime()
+                    semanticWorkspace.toJson().also {
+                        tuningLastWorkspaceJsonElapsedMs =
+                            (SystemClock.elapsedRealtime() - jsonStartedAt).coerceAtLeast(0L)
+                        tuningWorkspaceJsonCache = it
+                        tuningWorkspaceJsonCacheKey = cacheKey
+                    }
+                }
+            tuningWorkspaceLastCacheHit = cachedWorkspace != null && cachedJson != null
+            if (tuningWorkspaceLastCacheHit) tuningWorkspaceCacheReuseCount++
+            semanticJson
+                .put("capturedAtEpochMs", snapshot.capturedAtEpochMs)
+                .put("capability", "LIVE_READ_WRITE")
+                .put("dirtyPageCount", synchronized(tuningDirtyPageLock) { tuningDirtyPageNumbers.size })
+                .put("writeStatus", tuningWriteStatus)
+                .put("writeUncertain", tuningWriteUncertain)
+        }.getOrElse { error ->
+            JSONObject()
+                .put("status", "error")
+                .put("capability", "READ_ONLY")
+                .put("reason", (error.message ?: "Unable to build tuning workspace").take(240))
+                .put("iniCompatibility", iniCompatibilityJson())
+        }
+    }
+
+    /**
+     * T5 read-only semantic array detail. The caller supplies only the exact current-profile array
+     * name; page/offset/type/raw-byte authority remains native and TuneSnapshot-owned.
+     */
+    internal fun tuningArrayDetailJson(name: String): JSONObject {
+        val generation = generationAuthority.current()
+        if (generation <= 0L || !active.get() || state != State.STREAMING) {
+            return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "USB must be streaming before array detail is current")
+        }
+        val selectedProfile = profile
+            ?: return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "Import a matching mainController.ini")
+        if (signatureMatches != true || ecuSignature != selectedProfile.signature) {
+            return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "Live ECU signature does not match the imported INI")
+        }
+        val snapshot = latestTuneSnapshot
+            ?: return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "Complete TuneSnapshot is not available")
+        if (snapshot.generation != generation) {
+            return JSONObject()
+                .put("status", "not_ready")
+                .put("capability", "READ_ONLY")
+                .put("reason", "TuneSnapshot belongs to an obsolete USB generation")
+        }
+        return runCatching {
+            TuningWorkspaceBuilder.arrayDetail(selectedProfile, snapshot, generation, name).toJson()
+        }.getOrElse { error ->
+            JSONObject()
+                .put("status", "error")
+                .put("capability", "READ_ONLY")
+                .put("reason", (error.message ?: "Unable to build tuning array detail").take(240))
+        }
+    }
+
+
+    /**
+     * Transport-free semantic edit preview. All target resolution and encoding are delegated to
+     * the production TuningWritePlanner resolver; WebView callers supply semantic identity only.
+     */
+    internal fun previewTuningScalarJson(name: String, requestedValue: Double): JSONObject =
+        previewTuningChangeJson(
+            SemanticTuningWriteRequest(
+                kind = TuningWriteKind.SCALAR,
+                name = name,
+                requestedValue = requestedValue
+            )
+        )
+
+    internal fun previewTuningArrayCellJson(name: String, cellIndex: Int, requestedValue: Double): JSONObject =
+        previewTuningChangeJson(
+            SemanticTuningWriteRequest(
+                kind = TuningWriteKind.ARRAY_CELL,
+                name = name,
+                cellIndex = cellIndex,
+                requestedValue = requestedValue
+            )
+        )
+
+    internal fun previewTuningBitFieldJson(name: String, requestedValue: Double): JSONObject =
+        previewTuningChangeJson(
+            SemanticTuningWriteRequest(
+                kind = TuningWriteKind.BIT_FIELD,
+                name = name,
+                requestedValue = requestedValue
+            )
+        )
+
+    private fun previewTuningChangeJson(request: SemanticTuningWriteRequest): JSONObject {
+        val generation = generationAuthority.current()
+        if (generation <= 0L || !active.get() || state != State.STREAMING) {
+            return semanticPreviewUnavailable("USB must be streaming before tuning preview")
+        }
+        val selectedProfile = profile
+            ?: return semanticPreviewUnavailable("Import a matching mainController.ini")
+        if (signatureMatches != true || ecuSignature != selectedProfile.signature) {
+            return semanticPreviewUnavailable("Live ECU signature does not match the imported INI")
+        }
+        val snapshot = latestTuneSnapshot
+            ?: return semanticPreviewUnavailable("A complete TuneSnapshot is not available yet")
+        if (snapshot.generation != generation || !generationAuthority.isCurrent(generation)) {
+            return semanticPreviewUnavailable("TuneSnapshot belongs to an obsolete USB generation")
+        }
+
+        return runCatching {
+            TuningSemanticPreviewBuilder.preview(
+                profile = selectedProfile,
+                snapshot = snapshot,
+                currentGeneration = generation,
+                request = request
+            ).toJson()
+        }.getOrElse { error ->
+            JSONObject()
+                .put("status", "error")
+                .put("capability", "SEMANTIC_PREVIEW")
+                .put("reason", (error.message ?: "Unable to preview semantic tuning edit").take(240))
+        }
+    }
+
+    private fun semanticPreviewUnavailable(reason: String): JSONObject = JSONObject()
+        .put("status", "not_ready")
+        .put("capability", "SEMANTIC_PREVIEW")
+        .put("reason", reason)
+
     fun diagnosticsJson(includeAudit: Boolean = true): JSONObject {
         val now = SystemClock.elapsedRealtime()
         val selectedProfile = profile
@@ -1678,6 +2554,49 @@ class UsbEcuManager(
                 }
             }
         }
+        val snapshot = latestTuneSnapshot
+        val snapshotPages = JSONArray()
+        snapshot?.pages?.forEach { page ->
+            snapshotPages.put(JSONObject()
+                .put("pageNumber", page.pageNumber)
+                .put("identifier", page.identifier)
+                .put("size", page.size)
+                .put("sha256", sha256Hex(page.bytes())))
+        }
+        val snapshotComparison: Any = if (tuneSnapshotComparisonJson.isBlank()) {
+            JSONObject.NULL
+        } else {
+            try { JSONObject(tuneSnapshotComparisonJson) } catch (_: Exception) { JSONObject.NULL }
+        }
+        val tuneSnapshot = JSONObject()
+            .put("status", tuneSnapshotStatus)
+            .put("error", tuneSnapshotError)
+            .put("profileFingerprint", tuneSnapshotProfileFingerprint)
+            .put("fingerprint", tuneSnapshotFingerprint)
+            .put("previousFingerprint", tuneSnapshotPreviousFingerprint)
+            .put("matchesPrevious", tuneSnapshotMatchesPrevious ?: JSONObject.NULL)
+            .put("generation", tuneSnapshotGeneration.takeIf { it >= 0L } ?: JSONObject.NULL)
+            .put("totalBytes", tuneSnapshotTotalBytes)
+            .put("chunksRead", tuneSnapshotChunksRead)
+            .put("chunksTotal", tuneSnapshotChunksTotal)
+            .put("elapsedMs", tuneSnapshotElapsedMs)
+            .put("capturedAtEpochMs", tuneSnapshotCapturedAtEpochMs.takeIf { it > 0L } ?: JSONObject.NULL)
+            .put("pages", snapshotPages)
+            .put("comparison", snapshotComparison)
+
+        val legacyT3Recovery = t3RecoveryStore.load()
+        val legacyT6Recovery = t6RecoveryStore.load()
+        val legacyProofRecovery = JSONObject()
+            .put("t3State", legacyT3Recovery.state.name.lowercase(Locale.US))
+            .put("t3Error", legacyT3Recovery.error)
+            .put("t6State", legacyT6Recovery.state.name.lowercase(Locale.US))
+            .put("t6Phase", legacyT6Recovery.marker?.phase?.name ?: JSONObject.NULL)
+            .put("t6Error", legacyT6Recovery.error)
+            .put("executableProofFlows", false)
+            .put("policy", "Legacy proof recovery markers are preserved and block normal tuning until manually resolved")
+
+        val tuningReadWrite = tuningWriteStatusJson()
+
         val result = JSONObject()
             .put("state", state.name.lowercase(Locale.US))
             .put("message", stateMessage)
@@ -1688,6 +2607,18 @@ class UsbEcuManager(
             .put("signatureMatches", signatureMatches ?: JSONObject.NULL)
             .put("profile", selectedProfile?.importedName ?: JSONObject.NULL)
             .put("profileChannels", selectedProfile?.channels?.size ?: 0)
+            .put("tunePages", selectedProfile?.tunePages?.size ?: 0)
+            .put("tuneScalars", selectedProfile?.tuneScalars?.size ?: 0)
+            .put("tuneArrays", selectedProfile?.tuneArrays?.size ?: 0)
+            .put("tuneTables", selectedProfile?.tuneTables?.size ?: 0)
+            .put("tuneCurves", selectedProfile?.tuneCurves?.size ?: 0)
+            .put("tuneBitFields", selectedProfile?.tuneBitFields?.size ?: 0)
+            .put("tuneMenuItems", selectedProfile?.tuneMenuItems?.size ?: 0)
+            .put("tuneDialogs", selectedProfile?.tuneDialogs?.size ?: 0)
+            .put("tuneSnapshot", tuneSnapshot)
+            .put("legacyProofRecovery", legacyProofRecovery)
+            .put("tuningReadWrite", tuningReadWrite)
+            .put("iniCompatibility", iniCompatibilityJson())
             .put("outputBlockSize", selectedProfile?.outputBlockSize ?: 0)
             .put("pollTargetHz", preferredPollHz)
             .put("measuredHz", if (state == State.STREAMING) measuredHz else 0.0)
@@ -1730,7 +2661,6 @@ class UsbEcuManager(
             .put("successfulProbeMode", successfulProbeMode)
             .put("probeAttempts", attempts)
             .put("framedProtocolAttempts", framedAttempts)
-            .put("performanceProfile", performanceProfile.toJson())
             .put("decodePlanChannels", decodePlan.size)
             .put("requestedChannelCount", requestedChannelNames.size)
             .put("performance", PerformanceMetrics.snapshotJson())
@@ -1739,6 +2669,7 @@ class UsbEcuManager(
             result.put("channelAudit", channelAuditJson(now))
                 .put("codecSelfTest", codecSelfTest())
                 .put("profileParserSelfTest", UsbTunerStudioProfileParser.selfTest())
+                .put("tuneSnapshotBackup", latestTuneSnapshot?.toBackupJson() ?: JSONObject.NULL)
         }
         return result
     }
@@ -1831,6 +2762,8 @@ class UsbEcuManager(
 
     companion object {
         private const val EXTRA_PERMISSION_GENERATION = "usb_permission_generation"
+        private const val T3_NATIVE_SAFETY_MAX_AGE_MS = 250L
+        private const val NORMAL_TUNING_STATUS_MAX_AGE_MS = 250L
         private val CANONICAL_SPECS = listOf(
             CanonicalSpec("rpm", listOf("RPMValue")),
             CanonicalSpec("map", listOf("MAPValue")),
@@ -1855,6 +2788,8 @@ class UsbEcuManager(
         private const val PORT_OPEN_SETTLE_MS = 900L
         private const val STARTUP_READ_MS = 300
         private const val FULL_BLOCK_REQUEST_LIMIT = 4000
+        private const val NORMAL_TUNING_BURN_TIMEOUT_MS = 10_000L
+        private const val NORMAL_TUNING_BURN_POLL_MS = 100L
         private const val STREAM_CHUNK_SIZE = 1024
         private const val PROBE_READ_TIMEOUT_MS = 2500
         private const val QUIET_WINDOW_MS = 220

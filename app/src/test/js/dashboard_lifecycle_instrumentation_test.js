@@ -75,7 +75,12 @@ includesAll(lab, [
   'LifecycleDiagnostics.increment(webViewOwnerId, "deliveries")',
   'LifecycleDiagnostics.increment(usbOwnerId, "frames")',
   'LifecycleDiagnostics.increment(mslOwnerId, "samples")',
-  '.put("lifecycle", LifecycleDiagnostics.snapshotJson())',
+  'bridgeDeliveryEpoch = AtomicLong(0L)',
+  'bridgeDeliveryEpoch.incrementAndGet()',
+  'if (deliveryEpoch != bridgeDeliveryEpoch.get()) return@evaluateJavascript',
+  'val lifecycle = LifecycleDiagnostics.snapshotJson()',
+  '.put("previousProcessExitReasons", previousProcessExitReasonsJson())',
+  '.put("lastUncaughtCrash", CrashTraceStore.diagnosticsJson(this))',
   'lifecycleJson = lifecycle.toString(2)'
 ], 'LAB lifecycle instrumentation');
 

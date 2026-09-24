@@ -66,7 +66,7 @@ const src = Object.fromEntries([
 assert.ok(compact(src.render).includes(compact("if(analysisPage&&now-lastAnalysisRenderAt>=100){renderAnalysis();lastAnalysisRenderAt=now;}")), 'Analysis is active-page owned at 100 ms');
 assert.strictEqual((src.render.match(/\brenderAnalysis\s*\(/g) || []).length, 1, 'ordinary render has one Analysis call site');
 assert.ok(compact(src.render).includes(compact("if(dataRevision!==lastHeavyRenderRevision||now-lastHeavyRenderAt>=250){renderCustomWidgets();lastHeavyRenderRevision=dataRevision;lastHeavyRenderAt=now;}")), 'custom widgets use revision-or-250-ms ownership');
-assert.ok(compact(src.custom).includes(compact("performanceProfile==='full'&&!editMode?'.page.active .customWidget[data-editor-id]':'.customWidget[data-editor-id]'")), 'Full/non-edit custom widgets select the active page only');
+assert.ok(compact(src.custom).includes(compact("!editMode?'.page.active .customWidget[data-editor-id]':'.customWidget[data-editor-id]'")), 'optimized non-edit custom widgets select the active page only');
 assert.ok(src.custom.includes('renderGraphWidget(card,widget)'), 'custom graph cards use the graph renderer');
 assert.ok(compact(src.source).includes(compact('if(!options.keepHistory)clearTimeSeries(false);')), 'source changes clear history unless preserved');
 assert.ok(compact(src.capture).includes(compact('if(lastHistoryTime>=0&&t<lastHistoryTime-.25)timeSeries=[];')), 'reverse time clears retained history');
@@ -83,7 +83,7 @@ function historyHarness(options = {}) {
     performance: { now: () => nowMs }, source: options.source || 'LIVE', mslPosition: options.mslPosition ?? 0,
     paused: !!options.paused, selfTestRunning: !!options.selfTestRunning, timeSeries: options.timeSeries || [],
     lastHistoryCapture: options.lastHistoryCapture ?? 0, lastHistoryTime: options.lastHistoryTime ?? -1,
-    hist: { rpm: [], boost: [], target: [] }, performanceProfile: 'full', historySubscriptions: new Set(['rpm','map']),
+    hist: { rpm: [], boost: [], target: [] }, historySubscriptions: new Set(['rpm','map']),
     ALL_CHANNELS: ['rpm','map','tps'], data: { rpm: 1000, map: 100, tps: 10 }, settings: { historyWindow: selectedWindow },
     $: id => id === 'historyWindow' ? { value: String(selectedWindow) } : null,
     channelValid: key => Number.isFinite(Number(context.data[key])), clamp: (value,min,max) => Math.min(max,Math.max(min,value)), updatePendingIncidents() {}, renderAnalysis() {}, updateChannelInspector() {}

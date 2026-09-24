@@ -2,57 +2,85 @@
 
 ## Application surfaces
 
-`DashboardLabActivity` is the launcher and owns the primary LAB WebView, read-only USB transport, LAB-scoped BLE connection, log playback, diagnostics, location integration, and native-to-WebView snapshot publication.
+`DashboardLabActivity` is the primary application surface. It owns the LAB WebView and coordinates USB transport, BLE, diagnostics, log playback, location integration, native-to-WebView publication, profile/TuneSnapshot state, and the native Tuner bridge.
 
-`MainActivity` remains the legacy stock dashboard/button-box surface. It owns a separate Activity-scoped BLE manager while visible. Activity lifecycle rules prevent the hidden stock surface from retaining transport ownership behind LAB.
+`MainActivity` remains the legacy stock dashboard/button-box surface. Lifecycle rules prevent hidden surfaces from retaining conflicting transport ownership.
 
 ## Native Android responsibilities
 
 The Kotlin layer owns:
 
-- Android permissions and lifecycle;
-- BLE scanning, connection and the existing three legacy write queues;
-- USB device selection, permission ownership, CDC transport and read-only TunerStudio output polling;
-- ECU channel decoding and canonical native state;
-- GPS collection and legacy GPS payload mapping;
-- MSL/log playback;
-- persistent settings and bounded diagnostic history;
-- generation/session authority and performance measurements;
-- safe bridge publication into the dashboard WebView.
+- Android permissions/lifecycle;
+- BLE scanning/connection and legacy queues;
+- USB device selection, CDC transport and protocol ownership;
+- firmware/TunerStudio signature recognition;
+- generated-INI parsing/profile identity;
+- complete TuneSnapshot acquisition/persistence;
+- live output-channel decoding and canonical state;
+- semantic Tuner target resolution and guarded native mutation;
+- acknowledgement/read-back/full-snapshot verification;
+- explicit Burn sequencing and post-Burn verification;
+- GPS, playback, settings, diagnostics, crash breadcrumbs and performance metrics;
+- structured publication into the WebView.
 
-## Dashboard responsibilities
+## WebView responsibilities
 
-`app/src/main/assets/dashboard_lab.html` provides the current dashboard/LAB renderer and editor. It owns presentation, layout editing, math-expression evaluation, warning presentation, history graphs, demo scenarios, and user-facing diagnostics.
+`app/src/main/assets/dashboard_lab.html` and the Tuner workspace scripts own presentation, responsive layout, editing interactions, navigation and semantic edit requests.
 
-The WebView receives structured state from native Android. It does not own USB/BLE transport and cannot construct raw ECU commands.
+The WebView does **not** own USB/BLE transport and does not receive generic raw production ECU-command authority.
 
-## Read-only ECU flow
+## ECU recognition and profile authority
 
-The supported USB path is:
+The shared `0483:5740` STM32 USB identity is only a transport candidate.
 
 ```text
-Android USB host
-  -> supported-device selection
-  -> CDC control/data interface ownership
-  -> plain signature request
-  -> CRC-framed signature synchronization
-  -> CRC-framed output-channel reads
-  -> CRC validation
-  -> INI-profile decoding
-  -> canonical native snapshot
-  -> WebView presentation
+known transport candidate
+→ read-only TunerStudio signature probe
+→ firmware identity
+→ exact generated-INI full-signature match
+→ framed protocol preflight
+→ complete TuneSnapshot
+→ live output streaming / guarded Tuner authority
 ```
 
-`UsbEcuManager` implements discovery and output reads only. No tune-page writes, burns, controller reset, engine-stop command, output control, or generic raw command interface is implemented.
+Unknown/ambiguous hardware fails closed. A recognized transport without a matching generated profile may identify firmware but stops before tune/output/stream/write/Burn authority.
+
+`mainController.ini` is structural/schema/menu authority. The complete verified native TuneSnapshot is tune-value authority. Compiled profiles/workspace projections are derived acceleration only.
+
+## Live mutation authority
+
+```text
+semantic edit request
+→ native target resolution
+→ bounded write
+→ exact acknowledgement
+→ exact read-back
+→ complete expected TuneSnapshot verification
+→ verified RAM state
+→ separate explicit Burn
+→ flash-status evidence
+→ complete post-Burn TuneSnapshot verification
+```
+
+Uncertain outcomes fail closed. Offline/detached editing cannot write, queue ECU writes, or Burn.
+
+## 1207 live/offline project split
+
+1207 removes the previous eager multi-megabyte permanent-project work from normal live interaction:
+
+- live bulk workspace omits decoded array-cell payloads;
+- Table/Curve detail uses semantic single-array native detail;
+- permanent saved/offline project projection is deferred until the live path is absent and it is actually requested;
+- render-time full-workspace cloning is removed;
+- saved/offline values still derive from the persisted complete native TuneSnapshot;
+- Curves use measured plot geometry for responsive sizing.
+
+This split is responsible for the major live-path performance improvement observed in the current phone evidence.
 
 ## State and freshness authority
 
-USB attempts and invalidations use a process-local generation authority. Dashboard snapshots carry source/session/revision identity, and stale or non-increasing updates are rejected. Data freshness is based on the accepted ECU packet/snapshot timeline rather than WebView bridge age alone.
+USB attempts and invalidations use generation/session authority. Dashboard snapshots carry source/session/revision identity, and stale or non-increasing updates are rejected. Data freshness follows accepted native transport/snapshot state rather than WebView timing alone.
 
-## BLE queue status
+## Compatibility-test direction
 
-Button, variable-request and GPS/ADC traffic currently use three independent legacy FIFO queues with one in-flight flag per queue and no global GATT arbiter. Current production policy is characterized and instrumented but deliberately not corrected in this baseline. Queue depth, loss, completion, duration and overlap counters exist to support bounded physical evidence before policy changes.
-
-## Future tuning boundary
-
-Future ECU-write capability must be implemented beside—not inside—the dashboard renderer. The required design is a separate native tuning core with a typed allowlist, exact ECU/INI/tune identity, explicit safety-state machine, no blind retries after uncertain outcomes, read-back verification, deliberate RAM-write/burn separation, backup/recovery procedures, and staged bench/vehicle acceptance.
+Epic DashTune is now primarily a public compatibility-test vehicle. New hardware/profile support should be driven by real firmware signatures and generated INIs. Evidence from this line feeds the successor **EpicEFI – EpicHub** architecture; new product-level architecture should be implemented there rather than duplicated here.

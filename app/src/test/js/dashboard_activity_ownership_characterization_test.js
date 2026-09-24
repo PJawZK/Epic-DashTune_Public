@@ -253,6 +253,19 @@ assert.strictEqual(matrix.labStoppedBehindSettings.labBle, 1);
 assert.strictEqual(matrix.labStoppedBehindSettings.labUsb, 1);
 assert.strictEqual(matrix.labStoppedBehindSettings.labWebPush, 0);
 
+// AUTO transport must not start BLE discovery while a supported EpicEFI USB device is already present.
+const transportPolicy = section(lab, 'private fun reconcileTransportPolicy()', 'private fun startConnectionHost()');
+includesAll(transportPolicy, [
+  'usbEcuManager.hasSupportedUsbDevicePresent()',
+  '!supportedUsbPresent',
+  'autoBleFallbackScanStarted',
+  'bleManager.startScan()'
+], 'LAB USB-aware AUTO BLE policy');
+includesAll(usb, [
+  'fun hasSupportedUsbDevicePresent()',
+  'UsbDeviceSelectionPolicy.isSupportedDevice(selectionDescriptor(device))'
+], 'USB supported-device presence');
+
 console.log('Activity ownership characterization passed');
 console.log(JSON.stringify(matrix));
 console.log('Focused physical evidence remains required to confirm Main teardown and absence of a retained hidden Main owner after Main → LAB.');

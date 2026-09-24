@@ -28,7 +28,7 @@ else
   echo "This build will use Android debug signing and will not update the installed continuity-signed app." >&2
 fi
 
-gradle clean assembleDebug --stacktrace
+./gradlew clean assembleDebug --stacktrace
 
 APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 echo

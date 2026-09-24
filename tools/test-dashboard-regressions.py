@@ -11,7 +11,11 @@ assert "demoEnabled = false" in text
 assert "setSourceChannels('LIVE',[]);demoEnabled=false" in text
 assert 'id="demoToggleBtn">Enable Demo Data</button>' in text
 assert 'id="demoIndicator"' in text and "DEMO DATA ACTIVE" in text
-assert ".pill.hidden{display:none}" in text
+assert 'EPIC_SHARED_SHELL_STATIC_V1' in text
+assert '<header class="t4tw-topchrome t4tw-shared-topchrome">' in text
+assert 'id="sharedTopEcuState"' in text and 'id="sharedTopPageActions"' in text
+assert '<div class="statusbar">' not in text and '<div class="logo">' not in text
+assert 'id="clock"' not in text and 'id="rateText"' not in text and 'id="ageText"' not in text
 assert "settings.demoEnabled" not in text
 assert "setSourceChannels('DEMO',ECU_CHANNELS);updateValues(defaults,'DEMO');setScenario('idle')" not in text
 
@@ -25,6 +29,10 @@ def function_source(name: str) -> str:
             depth -= 1
             if depth == 0: return text[start:index + 1]
     raise RuntimeError(f"unterminated function {name}")
+
+assert "currentUsbTransportFreshness" not in function_source("channelValid"), "channelValid hot path must never cross the native bridge"
+assert "now-lastUsbFreshnessCheckAt<1000" in function_source("currentUsbTransportFreshness"), "native freshness fallback must be rate-limited"
+assert "currentUsbTransportFreshness(now,true)" in function_source("ecuStaleCondition"), "stale warning must bypass incomplete cached USB freshness once threshold is crossed"
 
 javascript = "\n".join(function_source(name) for name in (
     "nativeOrderingDecision", "staleCondition", "postSelfTestFreshnessDecision",
@@ -46,9 +54,9 @@ assert.strictEqual(demoOwnsGaugeValues({demoEnabled:true,source:'LIVE',selfTestR
 assert.strictEqual(demoOwnsGaugeValues({demoEnabled:true,source:'DEMO',selfTestRunning:true}),false);
 assert.strictEqual(shouldLiveSupersedeDemo({demoEnabled:true,connected:true}),true);
 assert.strictEqual(shouldLiveSupersedeDemo({demoEnabled:true,connected:false}),false);
-assert.strictEqual(maintenanceIntervalMs({performanceProfile:'full',source:'LIVE',liveConnectionActive:false}),1000);
-assert.strictEqual(maintenanceIntervalMs({performanceProfile:'full',source:'LIVE',liveConnectionActive:true}),100);
-assert.strictEqual(maintenanceIntervalMs({performanceProfile:'legacy',source:'LIVE',liveConnectionActive:false}),100);
+assert.strictEqual(maintenanceIntervalMs({source:'LIVE',liveConnectionActive:false}),1000);
+assert.strictEqual(maintenanceIntervalMs({source:'LIVE',liveConnectionActive:true}),100);
+assert.strictEqual(maintenanceIntervalMs({source:'DEMO',liveConnectionActive:false}),100);
 
 // Healthy streaming is disarmed through self-test cleanup, so no production
 // warning/overlay/incident owner can satisfy the stale predicate.
@@ -66,6 +74,10 @@ if(staleCondition(delayedDashboard)){warningState.overlay=true;warningState.warn
 assert.deepStrictEqual(warningState,{overlay:false,warningCount:4,incidentCount:2});
 assert.strictEqual(staleCondition({...delayedDashboard,
   nativeFreshness:{...healthyNative,packetAgeMs:900}}), true);
+assert.strictEqual(staleCondition({...delayedDashboard,
+  nativeFreshness:{...healthyNative,packetAgeMs:900,exclusiveOperation:true}}), false);
+assert.strictEqual(staleCondition({...delayedDashboard,
+  nativeFreshness:{...healthyNative,usbSessionId:7,packetAgeMs:900,exclusiveOperation:true}}), true);
 assert.strictEqual(staleCondition({...delayedDashboard,
   nativeFreshness:{...healthyNative,usbSessionId:7}}), true);
 assert.strictEqual(shouldUpdateChannelInspector({force:false,analysisActive:false}),false);

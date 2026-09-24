@@ -7,7 +7,6 @@
 
   const PATCH_VERSION = 1;
   const DERIVED_COORDINATOR_KEY = '__epicDashDerivedEvaluationCoordinator';
-  const TPS_COORDINATOR_KEY = '__epicDashTpsTraceOwnershipCoordinator';
   const RAF_WRAPPED_KEY = '__epicDashDerivedEvaluationRafWrapped';
 
   function createPublisher(options = {}) {
@@ -49,132 +48,6 @@
     const next = payload.complete ? {} : { ...(current || {}) };
     for (const [key, value] of Object.entries(payload.sections)) next[key] = value;
     return next;
-  }
-
-  function tpsRenderTargets(input = {}) {
-    if (input.performanceProfile !== 'full' || input.editMode === true) return null;
-    const activePageId = String(input.activePageId || '');
-    return {
-      daily: activePageId === 'page-daily',
-      drift: activePageId === 'page-drift',
-      boost: activePageId === 'page-boost',
-      analysis: activePageId === 'page-analysis',
-      diagnostics: activePageId === 'page-diagnostics'
-    };
-  }
-
-  function renderTpsTraceForTargets(targets, environment) {
-    if (!environment) throw new Error('A TPS render environment is required');
-    const all = targets == null;
-    const daily = all || targets.daily === true;
-    const drift = all || targets.drift === true;
-    const boost = all || targets.boost === true;
-    const analysis = all || targets.analysis === true;
-    const diagnostics = all || targets.diagnostics === true;
-    const direct = environment.channelValid('tps', false)
-      ? Number(environment.data.tps)
-      : Number.NaN;
-
-    if (Number.isFinite(direct)) {
-      if (daily) environment.setNodeText('tpsDaily', direct.toFixed(1));
-      if (drift) environment.setNodeText('tps', '' + direct.toFixed(1));
-      if (boost) environment.setNodeText('tpsBoost', direct.toFixed(1));
-      const markerLeft = `${environment.tpsVisualPercent(direct)}%`;
-      if (daily) environment.setStyle('tpsDailyMarker', 'left', markerLeft);
-      if (drift) environment.setStyle('tpsBar', 'left', markerLeft);
-      if (boost) environment.setStyle('tpsBoostMarker', 'left', markerLeft);
-    } else {
-      if (daily) environment.setNodeText('tpsDaily', '—');
-      if (drift) environment.setNodeText('tps', '—');
-      if (boost) environment.setNodeText('tpsBoost', '—');
-    }
-
-    if (analysis || diagnostics) {
-      const native = environment.tpsTraceState.native || {};
-      const hexByte = value => Number.isFinite(Number(value))
-        ? Number(value).toString(16).toUpperCase().padStart(2, '0')
-        : '—';
-      const line = `Raw bytes ${hexByte(native.rawByte0)} ${hexByte(native.rawByte1)} • raw ${Number.isFinite(Number(native.rawNumeric)) ? Number(native.rawNumeric) : '—'} • INI ${Number.isFinite(Number(native.decoded)) ? Number(native.decoded).toFixed(3) : '—'}%
-Profile TPSValue ${Number.isFinite(Number(native.profileTpsValue)) ? Number(native.profileTpsValue).toFixed(3) : '—'}% • canonical ${Number.isFinite(Number(native.canonical)) ? Number(native.canonical).toFixed(3) : '—'}% • JS ${Number.isFinite(Number(environment.tpsTraceState.accepted)) ? Number(environment.tpsTraceState.accepted).toFixed(3) : '—'}% • painted ${Number.isFinite(Number(environment.tpsTraceState.painted)) ? Number(environment.tpsTraceState.painted).toFixed(3) : '—'}%
-rawTps1Primary ${Number.isFinite(Number(native.rawTps1Primary)) ? Number(native.rawTps1Primary).toFixed(4) : '—'} • tpsADC ${Number.isFinite(Number(native.tpsADC)) ? Number(native.tpsADC).toFixed(1) : '—'} • pedal ${Number.isFinite(Number(native.throttlePedalPosition)) ? Number(native.throttlePedalPosition).toFixed(2) : '—'} • intent ${Number.isFinite(Number(native.DriverThrottleIntent)) ? Number(native.DriverThrottleIntent).toFixed(2) : '—'}
-Session ${environment.activeUsbSessionId} • accepted rev ${environment.tpsTraceState.acceptedRevision} • painted rev ${environment.tpsTraceState.paintedRevision} • bridge ${environment.bridgeTransitMs >= 0 ? environment.bridgeTransitMs.toFixed(1) + ' ms' : '—'}`;
-      if (analysis) environment.setNodeText('tpsAnalysisPipeline', line);
-      if (diagnostics) environment.setNodeText('tpsDiagnosticPipeline', line);
-    }
-
-    if (daily) {
-      environment.setNodeText(
-        'tpsDailyMeta',
-        `No smoothing • no clamp • rev ${environment.tpsTraceState.paintedRevision}`
-      );
-    }
-  }
-
-  function createTpsTraceOwnershipCoordinator(target, readState) {
-    if (!target) throw new Error('A global target is required');
-
-    let installed = false;
-    let originalRenderTpsTrace = null;
-    const stateReader = typeof readState === 'function' ? readState : function () {
-      const activePageId = target.document.querySelector('.page.active')?.id || 'page-daily';
-      return {
-        performanceProfile,
-        editMode,
-        activePageId,
-        environment: {
-          channelValid: (key, requireFresh) => channelValid(key, requireFresh),
-          data,
-          tpsTraceState,
-          activeUsbSessionId,
-          bridgeTransitMs,
-          setNodeText: (id, value) => setNodeText(id, value),
-          setStyle: (id, key, value) => setStyle(id, key, value),
-          tpsVisualPercent: value => tpsVisualPercent(value)
-        }
-      };
-    };
-
-    function install() {
-      if (installed) return true;
-      if (typeof target.renderTpsTrace !== 'function') return false;
-
-      originalRenderTpsTrace = target.renderTpsTrace;
-      target.renderTpsTrace = function () {
-        const state = stateReader();
-        const targets = tpsRenderTargets(state);
-        return renderTpsTraceForTargets(targets, state.environment);
-      };
-      installed = true;
-      return true;
-    }
-
-    function scheduleInstall() {
-      const documentObject = target.document;
-      if (!documentObject) return false;
-
-      let attempts = 0;
-      const attempt = function () {
-        if (install()) return;
-        attempts++;
-        if (attempts < 20 && typeof target.setTimeout === 'function') {
-          target.setTimeout(attempt, 0);
-        }
-      };
-
-      if (documentObject.readyState === 'loading' &&
-          typeof documentObject.addEventListener === 'function') {
-        documentObject.addEventListener('DOMContentLoaded', attempt, { once: true });
-      } else {
-        attempt();
-      }
-      return true;
-    }
-
-    function state() {
-      return { installed, originalRenderTpsTrace };
-    }
-
-    return { install, scheduleInstall, state };
   }
 
   /**
@@ -318,34 +191,12 @@ Session ${environment.activeUsbSessionId} • accepted rev ${environment.tpsTrac
     return coordinator;
   }
 
-  function autoInstallTpsTraceOwnership(target = root) {
-    if (!target || !target.document) return null;
-    if (target[TPS_COORDINATOR_KEY]) return target[TPS_COORDINATOR_KEY];
-
-    const coordinator = createTpsTraceOwnershipCoordinator(target);
-    try {
-      Object.defineProperty(target, TPS_COORDINATOR_KEY, {
-        value: coordinator,
-        configurable: true
-      });
-    } catch (_) {
-      target[TPS_COORDINATOR_KEY] = coordinator;
-    }
-    coordinator.scheduleInstall();
-    return coordinator;
-  }
-
   autoInstallDerivedEvaluationOwnership(root);
-  autoInstallTpsTraceOwnership(root);
 
   return {
     PATCH_VERSION,
     createPublisher,
     applyPatch,
-    tpsRenderTargets,
-    renderTpsTraceForTargets,
-    createTpsTraceOwnershipCoordinator,
-    autoInstallTpsTraceOwnership,
     createDerivedEvaluationCoordinator,
     autoInstallDerivedEvaluationOwnership
   };
