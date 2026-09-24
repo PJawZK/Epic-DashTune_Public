@@ -1,94 +1,101 @@
 # Source provenance
 
-## Initial public import
+## Current public compatibility baseline
 
 - Private source repository: `PJawZK/EpicDash-JZ`
-- Exact private `main` commit exported: `6d705d5ae3078a2ade377c51e8fe10b680374f1a`
-- Accepted application-source baseline represented by that tree: `13797491070fc32fd18c2bc52e137130a129ce5a`
-- Temporary export-workflow branch head: `6ded39dda336ef2c41ab84dc6225655b7b57ef0d`
-- Export workflow run: `30815441574`
-- Exact export-head Android-quality run: `#434` (`30815441856`), successful
-- Export artifact ID: `8856516144`
-- Public exact-head before the provenance-only update: `bd5564ffb171b8566ffa3122210273aed67dc52e`
-- Public Android-quality run: `#6` (`30822871731`), successful
+- Exact private integrated application-source commit: `9de5f4129cddc75692b39b84069f658c6a92ce61`
+- Accepted PR #86 source head: `5cf2244c0f49ce0b87c9c8230c92224d2828940a`
+- Application: `0.12.5-tuner-live-lazy-jz / 1207`
+- Private exact merged-main Android-quality run: `#1988 / 36041788337` — PASS
+- Private merged-main APK artifact ID: `10826804972`
+- Private merged-main artifact ZIP SHA-256: `52f3b52c6af1e33eac7421c3ead0f92bb39d919d6c77b023ec40e1d45294cbed`
+- Private merged-main extracted APK SHA-256: `59f16df82c2e3fb6dec7d9dafc92fd29d375350e45dc29e1ca2de8d9d776211e`
+- Private merged-main APK size: `7,571,317` bytes
+- Curated export workflow run: `36043195993` — PASS
+- Curated export artifact ID: `10827696167`
+- Curated export ZIP SHA-256: `a8cdf88f59f704ad76774f753ed262d96cde32c96e44b7cd58a7c30dc2c050db`
+- First public source-sync commit for this baseline: `c56fbe30cd0520a64398dbf247b428a51c945594`
 
-The temporary branch added only an export workflow. Application source was taken from the exact private `main` tree above.
+The public tree is a curated source export, not a mirror of private Git history. The normal merge of private PR #86 preserves the complete private development history; public history records only the reviewed export/import boundary.
 
-## Official RC1 binary publication
+## Current physical evidence boundary
 
-The first official release candidate was published on 2026-08-03 as GitHub pre-release [`v0.11.12-rc.1`](https://github.com/PJawZK/Epic-DashTune_Public/releases/tag/v0.11.12-rc.1).
+1207 has been physically exercised on a Samsung SM-A137F / Android 14 with the current MEGA144H7 firmware/profile combination. Evidence from that captured session includes:
 
-### Source and build identity
+- exact firmware/profile signature match;
+- complete 60,764-byte TuneSnapshot acquisition;
+- stable live streaming at about 19.5 Hz against the 20 Hz target;
+- zero CRC and protocol errors in the captured session;
+- multiple verified semantic RAM tune writes;
+- live permanent-project payload reduced from the previous multi-megabyte path to a 249-character deferred marker;
+- no new managed uncaught crash captured in that session.
 
-- Public release tag target: `24ace519ab249178f00972828b7bf20ac2df5580`
-- Private authoritative source commit: `6d705d5ae3078a2ade377c51e8fe10b680374f1a`
-- Accepted application-source baseline: `13797491070fc32fd18c2bc52e137130a129ce5a`
-- Exact private CI assembly head: `15aac93bf8d8cb385bd2cd3eaf6dd0fd43b63af5`
-- Private Android-quality workflow run: `30794624036`, run number `431`
-- Private CI APK artifact ID: `8848426854`
-- Official RC publication workflow run: `30829230084`, successful
+This is evidence for that tested phone/ECU/profile combination only. It is not broad qualification across other Android devices, ECU boards, firmware builds, or generated INIs.
 
-The private CI head and the authoritative private `main` commit differ only in controlled project documentation. The packaged Android application content and controlled assets correspond to the accepted application-source baseline above.
+## Public compatibility-test purpose
 
-### Distributed artifact identity
+The `v0.12.5-rc.1` line is intentionally published as a pre-release compatibility test build. The goal is to gather real-world evidence from:
 
-- APK: `Epic-DashTune-0.11.12-rc.1.apk`
-- APK SHA-256: `8747d162b426ce94f517750fa37907512bdfaeba81baf12098850dc1e3a3c5c2`
-- Size: `7088353` bytes
-- Package: `com.buttonbox.ble.jz`
-- Version name: `0.11.12-stale1-jz`
-- Version code: `1114`
-- Minimum Android API: `26`
-- Compile/target SDK: `34`
+- different EpicEFI/rusEFI STM32 hardware;
+- different firmware signatures;
+- genuine generated `mainController.ini` files;
+- differing runtime block/page geometry;
+- unsupported INI constructs and fail-closed states;
+- Android phones/tablets outside the current test set.
 
-### Signing and official verification
+Those findings are intended to strengthen the successor **EpicEFI – EpicHub** connection/profile architecture.
 
-- Android build-tools verifier: `34.0.0`
-- APK Signature Scheme v2: passed
-- Number of signers: `1`
-- Continuity signer certificate SHA-256: `d92dae5e61910fae171af41f615c00685e5e3e6909512f2a0429df0805db8f76`
-- Signer key: RSA 2048-bit
-- Package/version identity: passed
-- ZIP integrity: passed
-- Supported page-aware alignment check: passed
-- Controlled packaged asset equality: passed
+## Current tuning capability and safety boundary
 
-The release contains the APK, its checksum file, and the complete official verification report. The signing keystore, signing properties, passwords, private key, temporary binary delta, and operational publication payload were not committed to public `main`.
+Unlike the initial public RC1, 1207 is **not ECU read-only**.
 
-### Acceptance boundary
+A live tuning operation requires the current connection/profile authority chain and remains native/semantic:
 
-RC1 is an official pre-release artifact, but it has not yet replaced the previously accepted field APK. Installation, update-in-place continuity, Samsung SM-T500 behavior, EpicEFI Mega144H7 USB behavior, and physical BLE queue behavior require separately authorized physical acceptance.
+```text
+matching generated INI
++ current ECU generation/signature
++ complete TuneSnapshot
+→ semantic edit request
+→ native target resolution
+→ bounded write
+→ exact acknowledgement/read-back
+→ complete expected TuneSnapshot verification
+→ verified RAM state
+→ separate explicit Burn
+→ post-Burn verification
+```
 
-The ECU interface remains strictly read-only.
+The WebView does not receive raw production write authority. Detached/offline editing cannot write to the ECU or Burn. Unknown/ambiguous hardware and profile mismatches fail closed.
 
-## Allowlisted paths
+## Curated export paths and transformations
 
-The initial export includes:
+The 1207 source export includes the current Android application source/resources, tests, validation tools, Gradle text configuration, and public build inputs needed to reproduce the source state.
 
-- `app/`
-- `gradle/`
-- `tools/`
-- `.github/workflows/android-quality.yml`
-- root Gradle configuration files
-- `build-jz.sh`
+The public import deliberately excludes:
 
-Public-facing README, architecture, build, security, contribution, export-policy, provenance, and licensing-status documents were prepared separately for this public repository. The initial public Git import excludes the binary Gradle wrapper JAR and inherited logo PNG artwork pending separate provenance review; CI provisions Gradle 8.2 directly and a neutral vector placeholder supplies the referenced splash/icon resource.
+- private signing material and signing properties;
+- keystores/passwords/private keys/tokens;
+- private handoff and operational documents;
+- raw vehicle logs and sensitive diagnostics;
+- generated APK/AAB/build output;
+- machine-local properties and personal paths;
+- inherited private PNG logo artwork pending provenance review;
+- binary `gradle-wrapper.jar` pending provenance review.
 
-## Excluded material
+The public repository retains its neutral vector `epicdash_jz_logo.xml` replacement. Public CI provisions Gradle 8.2 directly rather than depending on the omitted binary wrapper JAR.
 
-The public source import excludes private signing material and properties, private continuity/handoff documents, assistant-specific instructions, internal audit/history documents, release-management internals, generated build output, personal paths, raw vehicle logs, tune/configuration artifacts, and sensitive diagnostics.
+`CURATED_PRIVATE_MANIFEST.sha256` records hashes produced from the exact curated private-export staging tree. Public-specific files and the neutral vector substitution are documented separately and therefore are not expected to be byte-identical to that private staging manifest.
 
-Official downloadable binaries are distributed as GitHub Release assets rather than committed to normal source history.
+## Validation performed for 1207 publication
 
-## Validation performed before upload
+- exact private application source merged with a normal merge commit;
+- exact merged-private `main` Android quality passed completely;
+- curated export source checked out from exact application commit `9de5f412...`;
+- export filename/content safety scans passed;
+- curated export archive checksum verified;
+- public source import preserved the public-only vector substitution and excluded private signing/log artifacts;
+- public PR/main CI is required to pass validators, Tuner authority/runtime tests, JVM unit tests, Android lint, and debug assembly before release publication.
 
-- export archive checksum verified;
-- path/name and content scans for keys, signing files, credentials, personal paths, APKs, logs, and diagnostic evidence;
-- Android package/version and manifest reviewed;
-- read-only USB transport boundary reviewed;
-- dashboard validator passed;
-- dashboard reconnect/stale regression suite passed;
-- all JavaScript characterization/source-contract tests passed;
-- private Android-quality CI passed JVM tests, Android lint, and APK assembly;
-- public exact-head Android-quality CI passed the same validation, JVM-test, lint, and debug-build gates;
-- official RC1 APK hash, package/version, continuity signer, ZIP integrity, alignment, and controlled packaged assets passed publication verification.
+## Historical initial import / RC1
+
+The initial public import and `v0.11.12-rc.1` remain part of repository/release history. Their exact provenance and read-only boundary were correct for those historical artifacts. They do not describe the current 1207 capability boundary.
