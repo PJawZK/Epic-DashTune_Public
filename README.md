@@ -1,77 +1,106 @@
 # Epic DashTune
 
-Epic DashTune is an Android dashboard, diagnostics, logging, playback, and tuning-analysis platform for EpicEFI systems.
+Epic DashTune is the legacy Android dashboard, diagnostics, logging, playback, and native Tuner application that preceded **EpicEFI – EpicHub**.
 
-> **Current safety boundary:** the application is strictly read-only with respect to the ECU. It does not write tune data, burn changes, control outputs, or virtual-input commands.
+Active long-term product development has moved to EpicHub. This repository remains public as a useful compatibility-test vehicle for EpicEFI/rusEFI Android connectivity, generated `mainController.ini` profiles, TunerStudio signatures, live telemetry, and the existing guarded native tuning path.
 
-This repository contains the curated public Android source, dashboard assets, validation tools, and automated tests. Experimental UX concepts remain in a separate project so prototypes are not mistaken for supported production behavior.
+> **Safety warning:** this build is **not ECU read-only**. With an exact matching generated INI, current ECU generation/signature, and complete TuneSnapshot, Epic DashTune can perform guarded semantic RAM tune writes and an explicit separate Burn. Do not change tuning values or Burn unless you understand the consequences and have appropriate recovery procedures.
 
-## Official release candidate
+## Current compatibility-test release
 
-The first official release candidate is available as a GitHub pre-release:
+Current source/application state:
 
-- Release: [Epic DashTune 0.11.12 RC1](https://github.com/PJawZK/Epic-DashTune_Public/releases/tag/v0.11.12-rc.1)
-- APK: [Epic-DashTune-0.11.12-rc.1.apk](https://github.com/PJawZK/Epic-DashTune_Public/releases/download/v0.11.12-rc.1/Epic-DashTune-0.11.12-rc.1.apk)
-- SHA-256 file: [Epic-DashTune-0.11.12-rc.1.apk.sha256](https://github.com/PJawZK/Epic-DashTune_Public/releases/download/v0.11.12-rc.1/Epic-DashTune-0.11.12-rc.1.apk.sha256)
-- Official verification report: [Epic-DashTune-0.11.12-rc.1-verification.txt](https://github.com/PJawZK/Epic-DashTune_Public/releases/download/v0.11.12-rc.1/Epic-DashTune-0.11.12-rc.1-verification.txt)
-- APK SHA-256: `8747d162b426ce94f517750fa37907512bdfaeba81baf12098850dc1e3a3c5c2`
+- Application: `0.12.5-tuner-live-lazy-jz / 1207`
+- Android package retained for continuity: `com.buttonbox.ble.jz`
+- Private integrated application-source baseline: `9de5f4129cddc75692b39b84069f658c6a92ce61`
+- Private merged-main Android quality: `#1988 / 36041788337` — PASS
+- Public release target: `v0.12.5-rc.1`
 
-RC1 was verified with Android build-tools 34.0.0. APK Signature Scheme v2, the expected continuity signer, package/version identity, ZIP integrity, supported page-alignment checking, and controlled packaged-asset equality all passed.
+The release is intentionally a **pre-release compatibility test build**, not a claim of broad hardware qualification.
 
-RC1 remains a pre-release until separately authorized physical acceptance on the target Samsung SM-T500 and EpicEFI Mega144H7 setup. The application remains strictly ECU read-only.
+## What we want testers to try
 
-See [the RC1 release record](docs/releases/v0.11.12-rc.1.md) for exact source, CI, signing, and acceptance provenance.
+The most useful public testing now is with **different real generated INIs and different EpicEFI/rusEFI STM32 hardware/firmware combinations**.
 
-## Current source identity
+Please report:
 
-- Public product name: **Epic DashTune**
-- Legacy Android app label in the initial import and RC1: **EpicDash JZ**
-- Android package retained for update continuity: `com.buttonbox.ble.jz`
-- Version: `0.11.12-stale1-jz` (`1114`)
-- Minimum Android: API 26
-- Compile/target SDK: API 34
-- ECU capability: strictly read-only
+- Android device/model and Android version;
+- ECU board/hardware;
+- exact firmware/TunerStudio signature shown by the app;
+- whether your genuine generated `mainController.ini` imports successfully;
+- whether exact signature/profile matching reaches preflight, complete TuneSnapshot, and stable streaming;
+- whether live channels decode correctly;
+- any fail-closed state, unsupported INI construct, crash, or major performance issue;
+- an exported diagnostic report when possible.
 
-The legacy package and app label are intentionally retained in this first public import and RC1. Renaming the installed application is a separate compatibility and release task.
+This evidence is particularly useful for strengthening **EpicHub's** future connection/profile compatibility matrix.
 
-## Implemented capabilities
+## Current authority and safety model
 
-- Android dashboard and LAB environment
-- read-only EpicEFI Mega144H7 USB output-channel streaming
-- BLE transport for the existing ESP32 dashboard/button-box integration
-- MSL log playback and imported tabular log playback
-- configurable dashboard layouts, math channels, warnings, and diagnostics
-- GPS integration and VSS fallback
-- bounded diagnostic history and performance instrumentation
-- dashboard, JVM, source-contract, and characterization tests
+Transport identity is not ECU identity. The known `0483:5740` USB identity is treated only as a shared STM32/rusEFI transport candidate.
 
-## Safety model
+The current connection/tuning authority is:
 
-The USB ECU transport implements signature discovery and output-channel reads only. No tune-page writes, burns, output commands, reset/stop commands, or generic raw ECU-command interface are implemented.
+```text
+known transport candidate
+→ read-only TunerStudio signature probe
+→ firmware identity
+→ exact generated-INI full-signature match
+→ protocol preflight
+→ complete native TuneSnapshot
+→ live telemetry / guarded native tuning authority
+```
 
-Future tuning capability is not part of the current application. Any such work requires a separate native tuning core, typed allowlist, explicit safety-state machine, fresh ECU/tune identity gates, read-back verification, deliberate RAM-write/burn separation, backup and recovery procedures, and staged physical acceptance.
+Unknown/ambiguous hardware and profile mismatches fail closed.
 
-See [SECURITY.md](SECURITY.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+`mainController.ini` is structure/schema/menu authority. A complete verified native TuneSnapshot is tune-value authority. The WebView does not own raw ECU transport or production write authority.
+
+Normal tune mutation remains native and guarded:
+
+```text
+semantic edit
+→ native target resolution
+→ bounded write
+→ exact acknowledgement/read-back
+→ complete expected TuneSnapshot verification
+→ verified RAM state
+→ separate explicit Burn
+→ post-Burn verification
+```
+
+Offline editing does not gain ECU write/Burn authority.
+
+## 1207 status
+
+1207 was physically exercised on a Samsung SM-A137F / Android 14 with the current MEGA144H7 generated profile. The captured session showed stable ~19.5 Hz streaming, zero CRC/protocol errors, multiple verified semantic RAM writes, and a major reduction in the previous live WebView project-payload overhead.
+
+That evidence is valid for the tested combination only. It is **not** broad qualification across other phones/tablets, ECUs, firmware builds, or generated INIs.
+
+Known remaining performance work is concentrated in profile restore, post-write workspace rebuilding, on-demand offline project construction, and initial TuneSnapshot acquisition.
 
 ## Building and testing
 
 The project uses JDK 17, Gradle 8.2, Android Gradle Plugin 8.2.0, and Android SDK 34.
 
+Public CI provisions Gradle 8.2 directly because the binary Gradle wrapper JAR remains excluded from the curated public source pending provenance review.
+
 ```bash
 python3 tools/validate-dashboard.py
 python3 tools/test-dashboard-regressions.py
-./gradlew testDebugUnitTest lintDebug assembleDebug
+gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
 ```
 
-See [docs/BUILDING.md](docs/BUILDING.md) for the complete setup, signing distinction, and official-release verification guidance.
+See [docs/BUILDING.md](docs/BUILDING.md) for the complete setup.
 
 ## Public-export provenance
 
-The initial source import was produced by an explicit allowlist from private development commit `6d705d5ae3078a2ade377c51e8fe10b680374f1a`. Private signing material, operational handoffs, assistant instructions, internal audit history, generated APKs, personal paths, raw vehicle logs, and sensitive diagnostics are not included in the public source tree.
-
-The official RC1 APK is distributed through GitHub Releases with its checksum and verification report. No signing key, signing properties, password, or private release payload is stored in this repository.
+This repository is a curated export of the private `PJawZK/EpicDash-JZ` repository, not a history mirror. Private signing material, operational handoffs, internal project history, generated APKs, raw vehicle logs, personal paths, and sensitive diagnostic evidence are not exported to normal public source history.
 
 See [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md) and [docs/PUBLIC_EXPORT_POLICY.md](docs/PUBLIC_EXPORT_POLICY.md).
+
+## EpicHub successor
+
+EpicHub is the active successor application. Findings from Epic DashTune compatibility testing should be treated as evidence for EpicHub, not as a reason to keep two competing application architectures alive.
 
 ## Licence status
 
