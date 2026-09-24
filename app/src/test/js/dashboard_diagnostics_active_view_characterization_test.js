@@ -285,6 +285,8 @@ for (const required of [
 assert.ok(!normalizedBridge.includes('buildDiagnosticReport'), 'periodic bridge does not build the full text report');
 
 const reportBlock = sourceBetween(activity, 'private fun buildDiagnosticReport(): String', 'private fun diagnosticHistoryEntries');
+assert.ok(reportBlock.includes('"iniCompatibility"'), 'full diagnostics export omits INI compatibility evidence');
+assert.ok(reportBlock.includes('usbEcuManager.iniCompatibilityJson()'), 'full diagnostics export does not use native INI compatibility authority');
 const normalizedReport = normalize(reportBlock);
 for (const required of [
   'DiagnosticStore.snapshotJson(this)',

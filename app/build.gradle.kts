@@ -41,8 +41,8 @@ android {
         applicationId = "com.buttonbox.ble.jz"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1114
-        versionName = "0.11.12-stale1-jz"
+        versionCode = 1207
+        versionName = "0.12.5-tuner-live-lazy-jz"
     }
 
     signingConfigs {
@@ -79,21 +79,6 @@ android {
     buildFeatures {
         viewBinding = true
     }
-}
-
-tasks.register("syncWhatsNew") {
-    doLast {
-        val source = file("../whatsnew/en-US/default.txt")
-        val dest = file("src/main/assets/whatsnew.txt")
-        if (source.exists()) {
-            source.copyTo(dest, overwrite = true)
-            println("Synced whatsnew.txt to assets")
-        }
-    }
-}
-
-tasks.named("preBuild") {
-    dependsOn("syncWhatsNew")
 }
 
 dependencies {

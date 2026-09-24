@@ -20,6 +20,11 @@ class PerformanceMetricsTest {
     }
 
     @Test
+    fun characterSeriesUseCharacterUnits() {
+        assertEquals("chars", PerformanceMetrics.unitFor("tunerProjectPayloadChars"))
+    }
+
+    @Test
     fun timingSeriesRemainMicroseconds() {
         listOf(
             "usbRead",

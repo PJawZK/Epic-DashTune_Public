@@ -1,6 +1,7 @@
 package com.buttonbox.ble
 
 import android.Manifest
+import android.app.ActivityManager
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.content.ClipData
@@ -33,15 +34,20 @@ import androidx.lifecycle.lifecycleScope
 import com.buttonbox.ble.data.SettingsManager
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Experimental dashboard workspace for live BLE data, demo scenarios,
@@ -61,14 +67,16 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
     private lateinit var settingsManager: SettingsManager
     private lateinit var usbEcuManager: UsbEcuManager
     private var usbProfile: UsbTunerStudioProfile? = null
+    @Volatile private var usbProfileRestoreInProgress: Boolean = false
     @Volatile private var liveTransportPreference: String = "auto"
     @Volatile private var latestUsbState: UsbEcuManager.State = UsbEcuManager.State.NO_PROFILE
     @Volatile private var bleSuspendedForUsb: Boolean = false
+    @Volatile private var autoBleFallbackScanStarted: Boolean = false
     private var variablePollingJob: Job? = null
     @Volatile private var servicesInitialized: Boolean = false
-    @Volatile private var performanceProfile: PerformanceProfile = PerformanceProfile.FULL_OPTIMIZED
     private val bridgePushQueued = AtomicBoolean(false)
     private val bridgeForcePending = AtomicBoolean(false)
+    private val bridgeDeliveryEpoch = AtomicLong(0L)
     @Volatile private var lastPushedSnapshotRevision: Long = -1L
     @Volatile private var activityResumed: Boolean = false
 
@@ -88,12 +96,16 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
 
     private val labBleControl = object : DashboardDataHub.BleControl {
         override fun scanNow() = runOnUiThread {
-            if (::bleManager.isInitialized && !usbOwnsTransport()) bleManager.startScan()
-            else dispatchLabNotice("BLE is paused while USB transport is selected")
+            if (::bleManager.isInitialized && !usbOwnsTransport()) {
+                if (liveTransportPreference == "auto") autoBleFallbackScanStarted = true
+                bleManager.startScan()
+            } else dispatchLabNotice("BLE is paused while USB transport is selected")
         }
         override fun reconnectNow() = runOnUiThread {
-            if (::bleManager.isInitialized && !usbOwnsTransport()) bleManager.reconnectNow()
-            else dispatchLabNotice("BLE is paused while USB transport is selected")
+            if (::bleManager.isInitialized && !usbOwnsTransport()) {
+                if (liveTransportPreference == "auto") autoBleFallbackScanStarted = true
+                bleManager.reconnectNow()
+            } else dispatchLabNotice("BLE is paused while USB transport is selected")
         }
         override fun disconnectNow() = runOnUiThread {
             if (::bleManager.isInitialized) bleManager.disconnect()
@@ -121,13 +133,29 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
     @Volatile private var pendingLayoutExportJson: String = ""
 
     private val handler = Handler(Looper.getMainLooper())
+    private val usbProfilePersistenceGeneration = AtomicLong(0L)
+    @Volatile private var usbIniImportPhase: String = "idle"
+    @Volatile private var usbIniImportName: String = ""
+    @Volatile private var usbIniImportMessage: String = "No INI import running"
+    @Volatile private var usbIniImportStartedAtElapsedMs: Long = 0L
+    @Volatile private var usbIniImportReadElapsedMs: Long = 0L
+    @Volatile private var usbIniImportParseElapsedMs: Long = 0L
+    @Volatile private var usbIniImportParserScanElapsedMs: Long = 0L
+    @Volatile private var usbIniImportParserBitOptionsElapsedMs: Long = 0L
+    @Volatile private var usbIniImportParserFinalizeElapsedMs: Long = 0L
+    @Volatile private var usbIniImportParserLineCount: Int = 0
+    @Volatile private var usbIniImportParserBreakdownJson: String = "{}"
+    @Volatile private var usbIniImportApplyElapsedMs: Long = 0L
+    @Volatile private var usbIniImportTotalElapsedMs: Long = 0L
+    @Volatile private var lastTuningWriteBridgeAtEpochMs: Long = 0L
+    @Volatile private var lastTuningWriteBridgeStatus: String = "idle"
+    @Volatile private var lastTuningWriteBridgeReason: String = ""
+    @Volatile private var lastTuningWriteBridgePayloadChars: Int = 0
     private val livePushRunnable = object : Runnable {
         override fun run() {
             if (!::webView.isInitialized || isFinishing || isDestroyed) return
-            // Legacy may still request a repeated 20 Hz status cadence for comparison, but every
-            // profile now uses the same bounded latest-state mailbox. No profile may create an
-            // unbounded evaluateJavascript backlog.
-            requestLiveSnapshotPush(performanceProfile == PerformanceProfile.INSTRUMENTED_LEGACY)
+            // Keep one bounded latest-state mailbox on the accepted optimized runtime path.
+            requestLiveSnapshotPush(false)
             handler.postDelayed(this, 50L)
         }
     }
@@ -165,10 +193,12 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
         PerformanceMetrics.timingUs("bridgeJsonBuild", System.nanoTime() - buildStartedNs)
         PerformanceMetrics.sample("bridgePayloadBytes", payload.toByteArray(Charsets.UTF_8).size.toLong())
         val deliveryStartedNs = System.nanoTime()
+        val deliveryEpoch = bridgeDeliveryEpoch.get()
         webView.evaluateJavascript(
             "window.EpicDashNativeUpdate && window.EpicDashNativeUpdate($payload);"
         ) {
             PerformanceMetrics.timingUs("bridgeRoundTrip", System.nanoTime() - deliveryStartedNs)
+            if (deliveryEpoch != bridgeDeliveryEpoch.get()) return@evaluateJavascript
             lastPushedSnapshotRevision = revision
             PerformanceMetrics.increment("bridgeDeliveries")
             LifecycleDiagnostics.increment(webViewOwnerId, "deliveries")
@@ -253,25 +283,313 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
         }
     }
 
-    private val openUsbIniLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri == null) { dispatchLabNotice("No TunerStudio INI selected"); return@registerForActivityResult }
-        try {
-            val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText().take(8_000_000) }
+    private fun usbProfileSourceFile(): File = File(filesDir, "epicdash-mainController.ini")
+
+    private fun readCappedIniSource(uri: Uri, limit: Int = 8_000_000): String {
+        val reader = contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)
+            ?: throw IllegalArgumentException("INI file could not be opened")
+        return reader.use { source ->
+            val out = StringBuilder(minOf(limit, 64 * 1024))
+            val buffer = CharArray(8192)
+            while (true) {
+                val count = source.read(buffer)
+                if (count < 0) break
+                if (out.length + count > limit) {
+                    throw IllegalArgumentException("INI exceeds the supported 8,000,000 character limit")
+                }
+                out.append(buffer, 0, count)
+            }
+            out.toString().takeIf { it.isNotBlank() }
                 ?: throw IllegalArgumentException("INI file was empty")
-            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "mainController.ini"
-            val parsed = UsbTunerStudioProfileParser.parse(text, name)
-            usbProfile = parsed
-            getSharedPreferences("epicdash_usb", Context.MODE_PRIVATE).edit()
-                .putString("profile", parsed.toJson().toString()).apply()
-            DashboardDataHub.setUsbChannelCatalog(JSONArray().also { array ->
-                parsed.channels.forEach { channel -> array.put(JSONObject().put("key", channel.name).put("unit", channel.unit).put("type", channel.dataType).put("offset", channel.offset)) }
-            })
-            if (::usbEcuManager.isInitialized) { usbEcuManager.setProfile(parsed); usbEcuManager.start() }
-            DiagnosticStore.addEvent(this, "USB", "Imported $name (${parsed.channels.size} channels, ${parsed.outputBlockSize} bytes)")
-            dispatchLabNotice("USB profile imported • ${parsed.channels.size} channels")
-        } catch (error: Exception) {
-            DiagnosticStore.addEvent(this, "USB", "INI import failed: ${error.message}")
-            dispatchLabNotice("INI import failed: ${error.message}")
+        }
+    }
+
+    private fun usbIniImportStatusJson(): JSONObject = JSONObject()
+        .put("phase", usbIniImportPhase)
+        .put("busy", usbIniImportPhase in setOf("selecting", "reading", "parsing", "applying", "restoring"))
+        .put("name", usbIniImportName.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+        .put("message", usbIniImportMessage)
+        .put("readElapsedMs", usbIniImportReadElapsedMs)
+        .put("parseElapsedMs", usbIniImportParseElapsedMs)
+        .put("parserScanElapsedMs", usbIniImportParserScanElapsedMs)
+        .put("parserBitOptionsElapsedMs", usbIniImportParserBitOptionsElapsedMs)
+        .put("parserFinalizeElapsedMs", usbIniImportParserFinalizeElapsedMs)
+        .put("parserLineCount", usbIniImportParserLineCount)
+        .put("parserScanBreakdownMs", runCatching { JSONObject(usbIniImportParserBreakdownJson) }.getOrElse { JSONObject() })
+        .put("applyElapsedMs", usbIniImportApplyElapsedMs)
+        .put("totalElapsedMs", usbIniImportTotalElapsedMs)
+
+    private fun updateUsbIniImportStatus(
+        phase: String,
+        name: String = usbIniImportName,
+        message: String,
+        readElapsedMs: Long = usbIniImportReadElapsedMs,
+        parseElapsedMs: Long = usbIniImportParseElapsedMs,
+        parserScanElapsedMs: Long = usbIniImportParserScanElapsedMs,
+        parserBitOptionsElapsedMs: Long = usbIniImportParserBitOptionsElapsedMs,
+        parserFinalizeElapsedMs: Long = usbIniImportParserFinalizeElapsedMs,
+        parserLineCount: Int = usbIniImportParserLineCount,
+        parserBreakdownJson: String = usbIniImportParserBreakdownJson,
+        applyElapsedMs: Long = usbIniImportApplyElapsedMs,
+        totalElapsedMs: Long = usbIniImportTotalElapsedMs
+    ) {
+        usbIniImportPhase = phase
+        usbIniImportName = name
+        usbIniImportMessage = message
+        usbIniImportReadElapsedMs = readElapsedMs.coerceAtLeast(0L)
+        usbIniImportParseElapsedMs = parseElapsedMs.coerceAtLeast(0L)
+        usbIniImportParserScanElapsedMs = parserScanElapsedMs.coerceAtLeast(0L)
+        usbIniImportParserBitOptionsElapsedMs = parserBitOptionsElapsedMs.coerceAtLeast(0L)
+        usbIniImportParserFinalizeElapsedMs = parserFinalizeElapsedMs.coerceAtLeast(0L)
+        usbIniImportParserLineCount = parserLineCount.coerceAtLeast(0)
+        usbIniImportParserBreakdownJson = parserBreakdownJson.takeIf { it.isNotBlank() } ?: "{}"
+        usbIniImportApplyElapsedMs = applyElapsedMs.coerceAtLeast(0L)
+        usbIniImportTotalElapsedMs = totalElapsedMs.coerceAtLeast(0L)
+        val payload = usbIniImportStatusJson().toString()
+        runOnUiThread {
+            if (::webView.isInitialized && webPageReady && !isFinishing && !isDestroyed) {
+                webView.evaluateJavascript(
+                    "window.EpicDashUsbIniImportStateChanged && window.EpicDashUsbIniImportStateChanged($payload);",
+                    null
+                )
+            }
+        }
+    }
+
+    private fun channelCatalogFor(parsed: UsbTunerStudioProfile): JSONArray =
+        JSONArray().also { array ->
+            parsed.channels.forEach { channel ->
+                array.put(JSONObject()
+                    .put("key", channel.name)
+                    .put("unit", channel.unit)
+                    .put("type", channel.dataType)
+                    .put("offset", channel.offset))
+            }
+        }
+
+    private fun applyUsbProfile(
+        parsed: UsbTunerStudioProfile,
+        channelCatalog: JSONArray,
+        announce: Boolean
+    ) {
+        usbProfile = parsed
+        DashboardDataHub.setUsbChannelCatalog(channelCatalog)
+        if (::usbEcuManager.isInitialized) {
+            usbEcuManager.setProfile(parsed)
+            if (liveTransportPreference != "ble") usbEcuManager.start()
+        }
+        DiagnosticStore.addEvent(
+            this,
+            "USB",
+            "Loaded ${parsed.importedName} (${parsed.channels.size} channels, ${parsed.outputBlockSize} bytes)"
+        )
+        if (announce) dispatchLabNotice("USB profile imported • ${parsed.channels.size} channels")
+    }
+
+    private fun restoreUsbProfileAsync() {
+        val restoreGeneration = usbProfilePersistenceGeneration.incrementAndGet()
+        val usbPrefs = getSharedPreferences("epicdash_usb", Context.MODE_PRIVATE)
+        usbProfileRestoreInProgress = true
+        lifecycleScope.launch {
+            try {
+                val persisted = withContext(Dispatchers.IO) {
+                    val source = usbProfileSourceFile()
+                    if (source.isFile) {
+                        Triple(
+                            "ini",
+                            "",
+                            usbPrefs.getString("profileName", "mainController.ini") ?: "mainController.ini"
+                        )
+                    } else {
+                        usbPrefs.getString("profile", null)?.let { Triple("json", it, "mainController.ini") }
+                    }
+                } ?: return@launch
+                if (usbProfilePersistenceGeneration.get() != restoreGeneration) return@launch
+                usbIniImportStartedAtElapsedMs = android.os.SystemClock.elapsedRealtime()
+                updateUsbIniImportStatus(
+                    phase = "restoring",
+                    name = persisted.third,
+                    message = "Restoring saved TunerStudio profile…",
+                    readElapsedMs = 0L,
+                    parseElapsedMs = 0L,
+                    parserScanElapsedMs = 0L,
+                    parserBitOptionsElapsedMs = 0L,
+                    parserFinalizeElapsedMs = 0L,
+                    parserLineCount = 0,
+                    parserBreakdownJson = "{}",
+                    applyElapsedMs = 0L,
+                    totalElapsedMs = 0L
+                )
+                val parseStartedAt = android.os.SystemClock.elapsedRealtime()
+                val prepared = withContext(Dispatchers.Default) {
+                    if (persisted.first == "ini") {
+                        val parsed = TunerPermanentProjectStore.loadProfileForCurrentIni(this@DashboardLabActivity)
+                            ?: throw IllegalStateException("Stored mainController.ini could not be restored")
+                        Triple(
+                            parsed,
+                            channelCatalogFor(parsed),
+                            UsbTunerStudioProfileParser.ParseMetrics(0, 0L, 0L, 0L, 0L)
+                        )
+                    } else {
+                        val parsed = UsbTunerStudioProfile.fromJson(JSONObject(persisted.second))
+                        Triple(
+                            parsed,
+                            channelCatalogFor(parsed),
+                            UsbTunerStudioProfileParser.ParseMetrics(0, 0L, 0L, 0L, 0L)
+                        )
+                    }
+                }
+                val parseElapsed = android.os.SystemClock.elapsedRealtime() - parseStartedAt
+                if (usbProfilePersistenceGeneration.get() != restoreGeneration) return@launch
+                val applyStartedAt = android.os.SystemClock.elapsedRealtime()
+                applyUsbProfile(prepared.first, prepared.second, announce = false)
+                val applyElapsed = android.os.SystemClock.elapsedRealtime() - applyStartedAt
+                val totalElapsed = android.os.SystemClock.elapsedRealtime() - usbIniImportStartedAtElapsedMs
+                updateUsbIniImportStatus(
+                    phase = "complete",
+                    name = persisted.third,
+                    message = "Saved INI restored • ${prepared.first.channels.size} channels",
+                    parseElapsedMs = parseElapsed,
+                    parserScanElapsedMs = prepared.third.scanElapsedMs,
+                    parserBitOptionsElapsedMs = prepared.third.bitOptionsElapsedMs,
+                    parserFinalizeElapsedMs = prepared.third.finalizeElapsedMs,
+                    parserLineCount = prepared.third.lineCount,
+                    parserBreakdownJson = prepared.third.toJson().optJSONObject("scanBreakdownMs")?.toString() ?: "{}",
+                    applyElapsedMs = applyElapsed,
+                    totalElapsedMs = totalElapsed
+                )
+            } catch (cancelled: CancellationException) {
+                // lifecycleScope cancellation is normal Activity/WebView teardown.
+                throw cancelled
+            } catch (error: Exception) {
+                val totalElapsed = if (usbIniImportStartedAtElapsedMs > 0L) {
+                    android.os.SystemClock.elapsedRealtime() - usbIniImportStartedAtElapsedMs
+                } else 0L
+                updateUsbIniImportStatus(
+                    phase = "failed",
+                    message = "Stored INI restore failed: ${error.message}",
+                    totalElapsedMs = totalElapsed
+                )
+                DiagnosticStore.addEvent(this@DashboardLabActivity, "USB", "Stored INI restore failed: ${error.message}")
+            } finally {
+                if (usbProfilePersistenceGeneration.get() == restoreGeneration) {
+                    usbProfileRestoreInProgress = false
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed && ::bleManager.isInitialized) {
+                            reconcileTransportPolicy()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private val openUsbIniLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri == null) {
+            updateUsbIniImportStatus(
+                phase = "cancelled",
+                message = "INI import cancelled",
+                totalElapsedMs = 0L
+            )
+            dispatchLabNotice("No TunerStudio INI selected")
+            return@registerForActivityResult
+        }
+        val importGeneration = usbProfilePersistenceGeneration.incrementAndGet()
+        val name = uri.lastPathSegment?.substringAfterLast('/') ?: "mainController.ini"
+        usbIniImportStartedAtElapsedMs = android.os.SystemClock.elapsedRealtime()
+        updateUsbIniImportStatus(
+            phase = "reading",
+            name = name,
+            message = "Reading $name…",
+            readElapsedMs = 0L,
+            parseElapsedMs = 0L,
+            parserScanElapsedMs = 0L,
+            parserBitOptionsElapsedMs = 0L,
+            parserFinalizeElapsedMs = 0L,
+            parserLineCount = 0,
+            parserBreakdownJson = "{}",
+            applyElapsedMs = 0L,
+            totalElapsedMs = 0L
+        )
+        lifecycleScope.launch {
+            try {
+                val readStartedAt = android.os.SystemClock.elapsedRealtime()
+                val text = withContext(Dispatchers.IO) {
+                    readCappedIniSource(uri)
+                }
+                val readElapsed = android.os.SystemClock.elapsedRealtime() - readStartedAt
+                if (usbProfilePersistenceGeneration.get() != importGeneration) return@launch
+
+                updateUsbIniImportStatus(
+                    phase = "parsing",
+                    name = name,
+                    message = "Parsing TunerStudio INI…",
+                    readElapsedMs = readElapsed
+                )
+                val parseStartedAt = android.os.SystemClock.elapsedRealtime()
+                val prepared = withContext(Dispatchers.Default) {
+                    val measured = UsbTunerStudioProfileParser.parseMeasured(text, name)
+                    Triple(measured.profile, channelCatalogFor(measured.profile), measured.metrics)
+                }
+                val parseElapsed = android.os.SystemClock.elapsedRealtime() - parseStartedAt
+                if (usbProfilePersistenceGeneration.get() != importGeneration) return@launch
+
+                updateUsbIniImportStatus(
+                    phase = "applying",
+                    name = name,
+                    message = "Persisting and applying ${prepared.first.channels.size} channels to USB/Tuner…",
+                    readElapsedMs = readElapsed,
+                    parseElapsedMs = parseElapsed
+                )
+                val persisted = withContext(Dispatchers.IO) {
+                    TunerPermanentProjectStore.persistAuthoritativeIni(
+                        this@DashboardLabActivity,
+                        text,
+                        name
+                    )
+                }
+                if (!persisted) {
+                    throw IllegalStateException("Exact INI source could not be committed and verified")
+                }
+                if (usbProfilePersistenceGeneration.get() != importGeneration) return@launch
+                val applyStartedAt = android.os.SystemClock.elapsedRealtime()
+                applyUsbProfile(prepared.first, prepared.second, announce = false)
+                val applyElapsed = android.os.SystemClock.elapsedRealtime() - applyStartedAt
+                val totalElapsed = android.os.SystemClock.elapsedRealtime() - usbIniImportStartedAtElapsedMs
+
+                updateUsbIniImportStatus(
+                    phase = "complete",
+                    name = name,
+                    message = "INI imported • ${prepared.first.channels.size} channels • ${totalElapsed} ms total",
+                    readElapsedMs = readElapsed,
+                    parseElapsedMs = parseElapsed,
+                    parserScanElapsedMs = prepared.third.scanElapsedMs,
+                    parserBitOptionsElapsedMs = prepared.third.bitOptionsElapsedMs,
+                    parserFinalizeElapsedMs = prepared.third.finalizeElapsedMs,
+                    parserLineCount = prepared.third.lineCount,
+                    parserBreakdownJson = prepared.third.toJson().optJSONObject("scanBreakdownMs")?.toString() ?: "{}",
+                    applyElapsedMs = applyElapsed,
+                    totalElapsedMs = totalElapsed
+                )
+                DiagnosticStore.addEvent(
+                    this@DashboardLabActivity,
+                    "USB",
+                    "INI import complete: $name readMs=$readElapsed parseMs=$parseElapsed scanMs=${prepared.third.scanElapsedMs} bitOptionsMs=${prepared.third.bitOptionsElapsedMs} finalizeMs=${prepared.third.finalizeElapsedMs} lines=${prepared.third.lineCount} breakdown=${prepared.third.toJson().optJSONObject("scanBreakdownMs")} applyMs=$applyElapsed totalMs=$totalElapsed channels=${prepared.first.channels.size}"
+                )
+                dispatchLabNotice("INI imported • ${prepared.first.channels.size} channels • ${totalElapsed} ms")
+            } catch (error: Exception) {
+                val totalElapsed = if (usbIniImportStartedAtElapsedMs > 0L) {
+                    android.os.SystemClock.elapsedRealtime() - usbIniImportStartedAtElapsedMs
+                } else 0L
+                updateUsbIniImportStatus(
+                    phase = "failed",
+                    name = name,
+                    message = "INI import failed: ${error.message}",
+                    totalElapsedMs = totalElapsed
+                )
+                DiagnosticStore.addEvent(this@DashboardLabActivity, "USB", "INI import failed: ${error.message}")
+                dispatchLabNotice("INI import failed: ${error.message}")
+            }
         }
     }
 
@@ -300,6 +618,7 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
     override fun onCreate(savedInstanceState: Bundle?) {
         setTheme(R.style.Theme_ButtonBoxBLE)
         super.onCreate(savedInstanceState)
+        CrashTraceStore.install(this)
         LifecycleDiagnostics.mark(activityOwnerId, "onCreate", "restored=${savedInstanceState != null}")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             splashScreen.setOnExitAnimationListener { provider -> provider.remove() }
@@ -320,6 +639,7 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
                     super.onPageFinished(view, url)
                     webPageReady = true
                     LifecycleDiagnostics.mark(webViewOwnerId, "page-ready", url ?: "")
+                    T4TuningWorkspaceSurface.install(view)
                     while (pendingMslEvents.isNotEmpty()) {
                         evaluateMslEvent(pendingMslEvents.removeFirst())
                     }
@@ -337,6 +657,10 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
                 displayZoomControls = false
             }
             addJavascriptInterface(LabNativeBridge(), "EpicDashAndroid")
+            // Recovery is deliberately installed before page load so availability never depends on
+            // file-existence heuristics or a second WebView reload. The bridge owns SAF only and
+            // has no ECU read/write/Burn authority.
+            addJavascriptInterface(TunerRecoveryBridge(applicationContext), "EpicDashTunerRecovery")
             loadUrl("file:///android_asset/dashboard_lab.html")
         }
 
@@ -369,23 +693,25 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
         DashboardDataHub.setAutomaticReconnectState(bleManager.isAutomaticReconnectEnabled)
         val usbPrefs = getSharedPreferences("epicdash_usb", Context.MODE_PRIVATE)
         liveTransportPreference = normalizeTransport(usbPrefs.getString("transport", "auto") ?: "auto")
-        performanceProfile = PerformanceProfile.fromKey(usbPrefs.getString("performanceProfile", "full"))
         DashboardDataHub.setLiveTransportPreference(liveTransportPreference)
-        DashboardDataHub.setPerformanceProfile(performanceProfile)
-        PerformanceMetrics.setProfile(performanceProfile)
-        usbProfile = usbPrefs.getString("profile", null)?.let { stored ->
-            try { UsbTunerStudioProfile.fromJson(JSONObject(stored)) } catch (_: Exception) { null }
+        if (liveTransportPreference != "ble") {
+            // AUTO/USB may make one bounded BLE fallback attempt, but do not run a permanent
+            // background reconnect loop. Explicit BLE mode retains continuous reconnect.
+            bleManager.setAutomaticReconnectEnabled(false)
         }
+        // The expanded INI model can be large; restore it after manager creation without blocking
+        // the Activity/UI thread.
+        usbProfile = null
         usbOwnerId = LifecycleDiagnostics.registerManager("USB-LAB", activityOwnerId)
         usbEcuManager = UsbEcuManager(this, this).also { manager ->
             LifecycleDiagnostics.mark(usbOwnerId, "constructed")
             val storedPollHz = usbPrefs.getInt("pollHz", 20).coerceIn(5, 20)
-            manager.setPerformanceProfile(performanceProfile)
             manager.setPollHz(storedPollHz)
             DashboardDataHub.setUsbPollTargetHz(storedPollHz)
             manager.setProfile(usbProfile)
             if (liveTransportPreference != "ble") manager.start()
         }
+        restoreUsbProfileAsync()
         DashboardDataHub.setUsbChannelCatalog(usbEcuManager.channelCatalogJson())
         LocationDataHub.registerListener(locationListener)
         if (DashboardDataHub.labActive && hasAllPermissions()) {
@@ -416,6 +742,9 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
     override fun onPause() {
         LifecycleDiagnostics.mark(activityOwnerId, "onPause")
         activityResumed = false
+        bridgeDeliveryEpoch.incrementAndGet()
+        bridgePushQueued.set(false)
+        lastPushedSnapshotRevision = -1L
         bridgeForcePending.set(true)
         webView.onPause()
         super.onPause()
@@ -438,6 +767,16 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         LifecycleDiagnostics.mark(activityOwnerId, "configuration-changed", "orientation=${newConfig.orientation}")
+    }
+
+    private fun notifyTuningWriteStateChanged() {
+        runOnUiThread {
+            if (!::webView.isInitialized || !webPageReady || !activityResumed) return@runOnUiThread
+            webView.evaluateJavascript(
+                "window.EpicDashTuningWriteStateChanged && window.EpicDashTuningWriteStateChanged();",
+                null
+            )
+        }
     }
 
     @Deprecated("Deprecated in Java")
@@ -510,7 +849,7 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
     private fun usbOwnsTransport(): Boolean = when (liveTransportPreference) {
         "usb" -> true
         "ble" -> false
-        else -> latestUsbState in setOf(
+        else -> usbProfileRestoreInProgress || latestUsbState in setOf(
             UsbEcuManager.State.PERMISSION,
             UsbEcuManager.State.OPENING,
             UsbEcuManager.State.HANDSHAKE,
@@ -523,6 +862,7 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
         if (!::bleManager.isInitialized) return
         val usbOwns = usbOwnsTransport()
         if (usbOwns) {
+            autoBleFallbackScanStarted = false
             if (!bleSuspendedForUsb) {
                 bleManager.suspendForAlternateTransport(
                     if (liveTransportPreference == "usb") "USB-only mode" else "USB connection in progress"
@@ -535,7 +875,18 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
             }
         } else {
             if (bleSuspendedForUsb) bleSuspendedForUsb = false
-            if (hasAllPermissions() && !bleManager.isConnected) bleManager.startScan()
+            if (hasAllPermissions() && !bleManager.isConnected) {
+                val supportedUsbPresent = ::usbEcuManager.isInitialized &&
+                    usbEcuManager.hasSupportedUsbDevicePresent()
+                val shouldScan = liveTransportPreference == "ble" ||
+                    (liveTransportPreference == "auto" &&
+                        !autoBleFallbackScanStarted &&
+                        !supportedUsbPresent)
+                if (shouldScan) {
+                    if (liveTransportPreference == "auto") autoBleFallbackScanStarted = true
+                    bleManager.startScan()
+                }
+            }
         }
     }
 
@@ -727,6 +1078,12 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
         })
     }
 
+    private fun tuningWriteBridgeStatusJson(): JSONObject = JSONObject()
+        .put("atEpochMs", lastTuningWriteBridgeAtEpochMs)
+        .put("status", lastTuningWriteBridgeStatus)
+        .put("reason", lastTuningWriteBridgeReason)
+        .put("payloadChars", lastTuningWriteBridgePayloadChars)
+
     private inner class LabNativeBridge {
         @JavascriptInterface
         fun getDiagnosticsJson(): String {
@@ -734,8 +1091,10 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
                 .put("app", appInfoJson())
                 .put("store", DiagnosticStore.snapshotJson(this@DashboardLabActivity))
                 .put("ble", DashboardDataHub.diagnosticsJson())
-                .put("usb", if (::usbEcuManager.isInitialized) usbEcuManager.diagnosticsJson(includeAudit = false) else JSONObject().put("state", "initializing"))
-                .put("lifecycle", LifecycleDiagnostics.snapshotJson())
+                .put("usb", (if (::usbEcuManager.isInitialized) usbEcuManager.diagnosticsJson(includeAudit = false) else JSONObject().put("state", "initializing"))
+                    .put("tuningWriteBridge", tuningWriteBridgeStatusJson()))
+                .put("lifecycle", LifecycleDiagnostics.snapshotJson()
+                    .put("lastUncaughtCrash", CrashTraceStore.diagnosticsJson(this@DashboardLabActivity)))
                 .put("dashboard", runtimeSnapshotJson())
                 .toString()
         }
@@ -852,10 +1211,227 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
         }
 
         @JavascriptInterface
-        fun importUsbIni() { runOnUiThread { openUsbIniLauncher.launch(arrayOf("text/plain", "application/octet-stream", "application/*")) } }
+        fun importUsbIni() {
+            updateUsbIniImportStatus(
+                phase = "selecting",
+                name = "",
+                message = "Select the matching mainController.ini",
+                readElapsedMs = 0L,
+                parseElapsedMs = 0L,
+                parserScanElapsedMs = 0L,
+                parserBitOptionsElapsedMs = 0L,
+                parserFinalizeElapsedMs = 0L,
+                parserLineCount = 0,
+                applyElapsedMs = 0L,
+                totalElapsedMs = 0L
+            )
+            runOnUiThread {
+                openUsbIniLauncher.launch(arrayOf("text/plain", "application/octet-stream", "application/*"))
+            }
+        }
 
         @JavascriptInterface
-        fun getUsbChannelCatalogJson(): String = DashboardDataHub.getUsbChannelCatalog().toString()
+        fun getUsbIniImportStatusJson(): String = usbIniImportStatusJson().toString()
+
+        @JavascriptInterface
+        fun getIniCompatibilityJson(): String {
+            return if (::usbEcuManager.isInitialized) {
+                usbEcuManager.iniCompatibilityJson().toString()
+            } else {
+                JSONObject()
+                    .put("state", "amber")
+                    .put("reason", "USB manager is still initializing")
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun requestPermanentTunerProject(): String {
+            val livePathBusy = !servicesInitialized || usbProfileRestoreInProgress || latestUsbState in setOf(
+                UsbEcuManager.State.PERMISSION,
+                UsbEcuManager.State.OPENING,
+                UsbEcuManager.State.HANDSHAKE,
+                UsbEcuManager.State.STREAMING,
+                UsbEcuManager.State.RETRY_WAIT
+            )
+            if (livePathBusy) {
+                return JSONObject()
+                    .put("status", "deferred_live_path")
+                    .put("usbState", latestUsbState.name)
+                    .toString()
+            }
+            if (!::webView.isInitialized || isFinishing || isDestroyed) {
+                return JSONObject().put("status", "unavailable").toString()
+            }
+            val queued = T4TuningWorkspaceSurface.requestPermanentProject(webView)
+            return JSONObject()
+                .put("status", if (queued) "queued" else "already_requested")
+                .put("usbState", latestUsbState.name)
+                .toString()
+        }
+
+        @JavascriptInterface
+        fun getTuningWorkspaceJson(): String {
+            return if (::usbEcuManager.isInitialized) {
+                usbEcuManager.tuningWorkspaceJson().toString()
+            } else {
+                JSONObject()
+                    .put("status", "initializing")
+                    .put("capability", "READ_ONLY")
+                    .put("reason", "USB manager is still initializing")
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun getTuningArrayDetailJson(name: String): String {
+            return if (::usbEcuManager.isInitialized) {
+                usbEcuManager.tuningArrayDetailJson(name).toString()
+            } else {
+                JSONObject()
+                    .put("status", "initializing")
+                    .put("capability", "READ_ONLY")
+                    .put("reason", "USB manager is still initializing")
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun previewTuningArrayCellJson(name: String, cellIndex: Int, requestedValue: Double): String {
+            return if (::usbEcuManager.isInitialized) {
+                usbEcuManager.previewTuningArrayCellJson(name, cellIndex, requestedValue).toString()
+            } else {
+                JSONObject()
+                    .put("status", "initializing")
+                    .put("capability", "SEMANTIC_PREVIEW")
+                    .put("reason", "USB manager is still initializing")
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun previewTuningScalarJson(name: String, requestedValue: Double): String {
+            return if (::usbEcuManager.isInitialized) {
+                usbEcuManager.previewTuningScalarJson(name, requestedValue).toString()
+            } else {
+                JSONObject()
+                    .put("status", "initializing")
+                    .put("capability", "SEMANTIC_PREVIEW")
+                    .put("reason", "USB manager is still initializing")
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun previewTuningBitFieldJson(name: String, requestedValue: Double): String {
+            return if (::usbEcuManager.isInitialized) {
+                usbEcuManager.previewTuningBitFieldJson(name, requestedValue).toString()
+            } else {
+                JSONObject()
+                    .put("status", "initializing")
+                    .put("capability", "SEMANTIC_PREVIEW")
+                    .put("reason", "USB manager is still initializing")
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun readTuningFromEcuJson(): String {
+            if (!::usbEcuManager.isInitialized) {
+                return JSONObject()
+                    .put("status", "initializing")
+                    .put("capability", "LIVE_TUNING_READ")
+                    .put("reason", "USB manager is still initializing")
+                    .toString()
+            }
+            return runCatching {
+                usbEcuManager.queueTuningRead { notifyTuningWriteStateChanged() }.toString()
+            }.getOrElse { error ->
+                JSONObject()
+                    .put("status", "error")
+                    .put("capability", "LIVE_TUNING_READ")
+                    .put("reason", error.message ?: error.javaClass.simpleName)
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun writeTuningChangesJson(json: String): String {
+            lastTuningWriteBridgeAtEpochMs = System.currentTimeMillis()
+            lastTuningWriteBridgePayloadChars = json.length
+            if (!::usbEcuManager.isInitialized) {
+                val reason = "USB manager is still initializing"
+                lastTuningWriteBridgeStatus = "initializing"
+                lastTuningWriteBridgeReason = reason
+                DiagnosticStore.addEvent(this@DashboardLabActivity, "TUNER", "Write bridge rejected: $reason")
+                return JSONObject()
+                    .put("status", "initializing")
+                    .put("capability", "LIVE_TUNING_WRITE")
+                    .put("reason", reason)
+                    .toString()
+            }
+            return runCatching {
+                usbEcuManager.queueTuningWriteBatchJson(json) { notifyTuningWriteStateChanged() }.also { result ->
+                    lastTuningWriteBridgeStatus = result.optString("status", "queued")
+                    lastTuningWriteBridgeReason = result.optString("reason", "")
+                    DiagnosticStore.addEvent(
+                        this@DashboardLabActivity,
+                        "TUNER",
+                        "Write bridge accepted: status=${result.optString("status", "")} payloadChars=${json.length}"
+                    )
+                }.toString()
+            }.getOrElse { error ->
+                val reason = (error.message ?: error.javaClass.simpleName).take(240)
+                lastTuningWriteBridgeStatus = "error"
+                lastTuningWriteBridgeReason = reason
+                DiagnosticStore.addEvent(this@DashboardLabActivity, "TUNER", "Write bridge rejected: $reason")
+                JSONObject()
+                    .put("status", "error")
+                    .put("capability", "LIVE_TUNING_WRITE")
+                    .put("reason", reason)
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun burnTuningChangesJson(): String {
+            if (!::usbEcuManager.isInitialized) {
+                return JSONObject()
+                    .put("status", "initializing")
+                    .put("capability", "LIVE_TUNING_PERSIST")
+                    .put("reason", "USB manager is still initializing")
+                    .toString()
+            }
+            return runCatching {
+                usbEcuManager.queueTuningBurn { notifyTuningWriteStateChanged() }.toString()
+            }.getOrElse { error ->
+                JSONObject()
+                    .put("status", "error")
+                    .put("capability", "LIVE_TUNING_PERSIST")
+                    .put("reason", error.message ?: error.javaClass.simpleName)
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun getTuningWriteStatusJson(): String {
+            return if (::usbEcuManager.isInitialized) {
+                usbEcuManager.tuningWriteStatusJson().toString()
+            } else {
+                JSONObject()
+                    .put("status", "initializing")
+                    .put("capability", "LIVE_TUNING_READ_WRITE")
+                    .put("operationRunning", false)
+                    .put("uncertain", false)
+                    .put("dirtyPageCount", 0)
+                    .toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun getUsbChannelCatalogJson(): String = runCatching {
+            DashboardDataHub.getUsbChannelCatalog().toString()
+        }.getOrElse { "[]" }
 
         @JavascriptInterface
         fun setUsbRequiredChannels(json: String): Boolean {
@@ -885,8 +1461,12 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
             val normalized = normalizeTransport(mode)
             liveTransportPreference = normalized
             DashboardDataHub.setLiveTransportPreference(normalized)
+            autoBleFallbackScanStarted = false
             getSharedPreferences("epicdash_usb", Context.MODE_PRIVATE).edit().putString("transport", normalized).apply()
             runOnUiThread {
+                if (::bleManager.isInitialized) {
+                    bleManager.setAutomaticReconnectEnabled(normalized == "ble")
+                }
                 if (normalized == "ble" && ::usbEcuManager.isInitialized) {
                     usbEcuManager.disconnect("USB transport not selected")
                     latestUsbState = UsbEcuManager.State.DISABLED
@@ -895,22 +1475,6 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
                 }
                 reconcileTransportPolicy()
             }
-            return true
-        }
-
-        @JavascriptInterface
-        fun setPerformanceProfile(key: String): Boolean {
-            val selected = PerformanceProfile.fromKey(key)
-            performanceProfile = selected
-            getSharedPreferences("epicdash_usb", Context.MODE_PRIVATE).edit()
-                .putString("performanceProfile", selected.key).apply()
-            DashboardDataHub.setPerformanceProfile(selected)
-            PerformanceMetrics.setProfile(selected)
-            PerformanceMetrics.reset()
-            lastPushedSnapshotRevision = -1L
-            if (::usbEcuManager.isInitialized) usbEcuManager.setPerformanceProfile(selected)
-            DiagnosticStore.addEvent(this@DashboardLabActivity, "PERF", "Performance profile set to ${selected.label}")
-            requestLiveSnapshotPush(true)
             return true
         }
 
@@ -926,8 +1490,16 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
 
         @JavascriptInterface
         fun clearUsbProfile(): Boolean {
+            usbProfilePersistenceGeneration.incrementAndGet()
             usbProfile = null
-            getSharedPreferences("epicdash_usb", Context.MODE_PRIVATE).edit().remove("profile").apply()
+            getSharedPreferences("epicdash_usb", Context.MODE_PRIVATE).edit()
+                .remove("profile")
+                .remove("profileName")
+                .apply()
+            lifecycleScope.launch(Dispatchers.IO) {
+                usbProfileSourceFile().delete()
+                File(filesDir, "epicdash-mainController.ini.tmp").delete()
+            }
             DashboardDataHub.setUsbChannelCatalog(JSONArray())
             if (::usbEcuManager.isInitialized) usbEcuManager.setProfile(null)
             return true
@@ -1081,11 +1653,53 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
             .put("buildType", if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) "debug" else "release")
             .put("androidUserId", Process.myUid() / 100000)
             .put("lastUpdateTime", packageInfo.lastUpdateTime)
-            .put("performanceProfile", performanceProfile.toJson())
     }
 
     private fun runtimeSnapshotJson(): JSONObject =
         dashboardRuntimeSnapshots.snapshot(System.currentTimeMillis())
+
+    private fun previousProcessExitReasonsJson(): JSONArray {
+        val result = JSONArray()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return result
+        return runCatching {
+            val manager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            manager.getHistoricalProcessExitReasons(packageName, 0, 6).forEach { info ->
+                result.put(
+                    JSONObject()
+                        .put("reason", info.reason)
+                        .put("reasonLabel", processExitReasonLabel(info.reason))
+                        .put("timestamp", info.timestamp)
+                        .put("status", info.status)
+                        .put("importance", info.importance)
+                        .put("pssBytes", info.pss)
+                        .put("rssBytes", info.rss)
+                        .put("processName", info.processName ?: "")
+                        .put("description", info.description?.toString()?.take(240) ?: "")
+                )
+            }
+            result
+        }.getOrDefault(result)
+    }
+
+    private fun processExitReasonLabel(reason: Int): String = when (reason) {
+        1 -> "EXIT_SELF"
+        2 -> "SIGNALED"
+        3 -> "LOW_MEMORY"
+        4 -> "CRASH"
+        5 -> "CRASH_NATIVE"
+        6 -> "ANR"
+        7 -> "INITIALIZATION_FAILURE"
+        8 -> "PERMISSION_CHANGE"
+        9 -> "EXCESSIVE_RESOURCE_USAGE"
+        10 -> "USER_REQUESTED"
+        11 -> "USER_STOPPED"
+        12 -> "DEPENDENCY_DIED"
+        13 -> "OTHER"
+        14 -> "FREEZER"
+        15 -> "PACKAGE_STATE_CHANGE"
+        16 -> "PACKAGE_UPDATED"
+        else -> "UNKNOWN"
+    }
 
     private fun buildDiagnosticReport(): String {
         val packageInfo = packageManager.getPackageInfo(packageName, 0)
@@ -1096,8 +1710,17 @@ class DashboardLabActivity : AppCompatActivity(), MslLogPlayer.Listener, BleMana
         } else {
             JSONObject().put("state", "initializing")
         }
+            .put(
+                "iniCompatibility",
+                if (::usbEcuManager.isInitialized) usbEcuManager.iniCompatibilityJson()
+                else JSONObject().put("state", "red").put("reason", "USB manager is still initializing")
+            )
+            .put("iniImport", usbIniImportStatusJson())
+            .put("tuningWriteBridge", tuningWriteBridgeStatusJson())
         val dashboard = runtimeSnapshotJson()
         val lifecycle = LifecycleDiagnostics.snapshotJson()
+            .put("previousProcessExitReasons", previousProcessExitReasonsJson())
+            .put("lastUncaughtCrash", CrashTraceStore.diagnosticsJson(this))
         val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             packageInfo.longVersionCode
         } else {

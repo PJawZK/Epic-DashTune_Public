@@ -53,7 +53,7 @@ BLE / SESSION
   "connected": true
 }
 
-USB ECU / READ-ONLY TRANSPORT
+USB ECU / TUNERSTUDIO TRANSPORT
 {
   "state": "streaming"
 }
@@ -108,7 +108,7 @@ Device: unknown unknown
 BLE / SESSION
 {}
 
-USB ECU / READ-ONLY TRANSPORT
+USB ECU / TUNERSTUDIO TRANSPORT
 {}
 
 LIFECYCLE / OWNER TRACE

@@ -43,7 +43,7 @@ internal object DiagnosticReportFormatter {
         report.appendLine("BLE / SESSION")
         report.appendLine(input.bleJson)
         report.appendLine()
-        report.appendLine("USB ECU / READ-ONLY TRANSPORT")
+        report.appendLine("USB ECU / TUNERSTUDIO TRANSPORT")
         report.appendLine(input.usbJson)
         report.appendLine()
         report.appendLine("LIFECYCLE / OWNER TRACE")

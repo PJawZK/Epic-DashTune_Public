@@ -66,12 +66,12 @@ const src = Object.fromEntries([
 ].map(([name, marker]) => [name, functionSource(html, marker)]));
 
 assert.ok(compact(src.render).includes(compact("if(dataRevision!==lastHeavyRenderRevision||now-lastHeavyRenderAt>=250){renderCustomWidgets();lastHeavyRenderRevision=dataRevision;lastHeavyRenderAt=now;}")), 'custom widgets render on each new accepted revision or the 250 ms fallback');
-assert.ok(compact(src.custom).includes(compact("performanceProfile==='full'&&!editMode?'.page.active .customWidget[data-editor-id]':'.customWidget[data-editor-id]'")), 'Full/non-edit selects active-page custom widgets only');
+assert.ok(compact(src.custom).includes(compact("!editMode?'.page.active .customWidget[data-editor-id]':'.customWidget[data-editor-id]'")), 'optimized non-edit runtime selects active-page custom widgets only');
 assert.ok(compact(src.html).includes("if(type==='control')") && compact(src.html).includes("if(type==='graph')") && compact(src.html).includes("if(type==='radial')") && compact(src.html).includes("if(type==='bar')"), 'custom HTML has the five editor widget families');
 assert.ok(compact(src.duplicate).includes(compact("['number','bar','radial','graph','control'].includes(widget.type)")), 'duplicate preserves the five supported custom widget types');
 assert.ok(src.normalize.includes("'tach','history','graph','control'"), 'layout normalization still accepts built-in tach/history types');
 assert.ok(compact(src.custom).includes(compact('const segments=[...card.querySelectorAll(\'[data-role="segments"] span\')];segments.forEach')), 'radial segment work is performed during ordinary custom rendering');
-assert.ok(compact(src.custom).endsWith(compact("const activePageId=performanceProfile==='full'&&!editMode?document.querySelector('.page.active')?.id:null;renderLayoutVisualStates(activePageId||null);}")), 'every custom render ends with a layout-wide visual-state pass');
+assert.ok(compact(src.custom).endsWith(compact("const activePageId=!editMode?document.querySelector('.page.active')?.id:null;renderLayoutVisualStates(activePageId||null);}")), 'every custom render ends with a layout-wide visual-state pass');
 
 function trackedElement(kind = 'generic') {
   const stats = { textWrites: 0, styleWrites: 0, classToggles: 0, attributeWrites: 0, innerHtmlWrites: 0 };
@@ -180,7 +180,7 @@ function makeWidget(id, type, extra = {}) {
   };
 }
 
-function runFixture({ pages, profile = 'full', editMode = false, activePage = pages[0].id, repeats = 1 }) {
+function runFixture({ pages, editMode = false, activePage = pages[0].id, repeats = 1 }) {
   const counters = {
     selectorQueries: 0,
     visualQueries: 0,
@@ -221,7 +221,6 @@ function runFixture({ pages, profile = 'full', editMode = false, activePage = pa
   };
   const context = {
     console, Math, Number, Object, Map, CSS: { escape: String },
-    performanceProfile: profile,
     editMode,
     document,
     source: 'LIVE',
@@ -279,11 +278,9 @@ for (const count of [1, 8, 32]) {
 {
   const active = Array.from({ length: 4 }, (_, index) => makeWidget(`a${index}`, 'number'));
   const hidden = Array.from({ length: 4 }, (_, index) => makeWidget(`h${index}`, 'number'));
-  const full = runFixture({ pages: [page('page-a', active), page('page-b', hidden)], profile: 'full', editMode: false, activePage: 'page-a' });
-  const legacy = runFixture({ pages: [page('page-a', active), page('page-b', hidden)], profile: 'legacy', editMode: false, activePage: 'page-a' });
-  const editing = runFixture({ pages: [page('page-a', active), page('page-b', hidden)], profile: 'full', editMode: true, activePage: 'page-a' });
-  assert.strictEqual(full.counters.visualCalls, 8, 'Full/non-edit renders and visually evaluates active-page custom widgets only');
-  assert.strictEqual(legacy.counters.visualCalls, 16, 'Legacy renders and visually evaluates custom widgets on all pages');
+  const normal = runFixture({ pages: [page('page-a', active), page('page-b', hidden)], editMode: false, activePage: 'page-a' });
+  const editing = runFixture({ pages: [page('page-a', active), page('page-b', hidden)], editMode: true, activePage: 'page-a' });
+  assert.strictEqual(normal.counters.visualCalls, 8, 'normal optimized runtime renders and visually evaluates active-page custom widgets only');
   assert.strictEqual(editing.counters.visualCalls, 16, 'Edit Mode renders and visually evaluates custom widgets on all pages');
 }
 

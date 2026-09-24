@@ -21,15 +21,15 @@ class UsbDeviceSelectionPolicyTest {
     }
 
     @Test
-    fun supportedMegaCompositeRequiresExactIdentityAndCdcShape() {
-        val mega = megaDevice(deviceId = 13)
+    fun sharedFirmwareCompositeRequiresKnownIdentityAndCdcShape() {
+        val firmwareDevice = firmwareDevice(deviceId = 13)
 
-        assertTrue(UsbDeviceSelectionPolicy.isSupportedDevice(mega))
-        assertEquals(13, UsbDeviceSelectionPolicy.selectCandidate(listOf(mega))?.deviceId)
+        assertTrue(UsbDeviceSelectionPolicy.isSupportedDevice(firmwareDevice))
+        assertEquals(13, UsbDeviceSelectionPolicy.selectCandidate(listOf(firmwareDevice))?.deviceId)
     }
 
     @Test
-    fun matchingIdentityWithoutCdcControlOrDataIsRejected() {
+    fun matchingFirmwareIdentityWithoutCdcControlOrDataIsRejected() {
         val missingControl = device(
             deviceId = 3,
             vendorId = 0x0483,
@@ -60,18 +60,18 @@ class UsbDeviceSelectionPolicyTest {
     }
 
     @Test
-    fun deterministicSelectionIgnoresUnrelatedDevicesAndUsesLowestSupportedDeviceId() {
+    fun deterministicSelectionIgnoresUnrelatedDevicesAndUsesLowestFirmwareDeviceId() {
         val unrelated = device(
             deviceId = 1,
             vendorId = 0x14CD,
             productId = 0x1212,
             interfaces = listOf(massStorageInterface())
         )
-        val laterMega = megaDevice(deviceId = 27)
-        val earlierMega = megaDevice(deviceId = 19)
+        val laterFirmwareDevice = firmwareDevice(deviceId = 27)
+        val earlierFirmwareDevice = firmwareDevice(deviceId = 19)
 
         val selected = UsbDeviceSelectionPolicy.selectCandidate(
-            listOf(laterMega, unrelated, earlierMega)
+            listOf(laterFirmwareDevice, unrelated, earlierFirmwareDevice)
         )
 
         assertEquals(19, selected?.deviceId)
@@ -96,19 +96,19 @@ class UsbDeviceSelectionPolicyTest {
     }
 
     @Test
-    fun supportedAttachStartsDiscoveryOnlyWhenNoHealthySessionOwnsUsb() {
-        val mega = megaDevice(deviceId = 13)
+    fun firmwareAttachStartsDiscoveryOnlyWhenNoHealthySessionOwnsUsb() {
+        val firmwareDevice = firmwareDevice(deviceId = 13)
 
         assertTrue(
             UsbDeviceSelectionPolicy.shouldStartDiscoveryForAttach(
-                attached = mega,
+                attached = firmwareDevice,
                 currentDeviceId = null,
                 streaming = false
             )
         )
         assertFalse(
             UsbDeviceSelectionPolicy.shouldStartDiscoveryForAttach(
-                attached = mega,
+                attached = firmwareDevice,
                 currentDeviceId = 9,
                 streaming = true
             )
@@ -126,13 +126,13 @@ class UsbDeviceSelectionPolicyTest {
     fun streamingRequiresExactNonBlankIniSignature() {
         val expected = "rusEFI master.2026.05.24.MEGA144H7.3684405155"
 
-        assertTrue(UsbDeviceSelectionPolicy.exactSignatureMatches(expected, "  $expected\u0000 ".trimEnd('\u0000', ' ')))
+        assertTrue(UsbDeviceSelectionPolicy.exactSignatureMatches(expected, "  $expected\u0000 "))
         assertFalse(UsbDeviceSelectionPolicy.exactSignatureMatches(expected, "rusEFI master.other"))
         assertFalse(UsbDeviceSelectionPolicy.exactSignatureMatches("", expected))
         assertFalse(UsbDeviceSelectionPolicy.exactSignatureMatches("   ", expected))
     }
 
-    private fun megaDevice(deviceId: Int): UsbDeviceDescriptor = device(
+    private fun firmwareDevice(deviceId: Int): UsbDeviceDescriptor = device(
         deviceId = deviceId,
         vendorId = 0x0483,
         productId = 0x5740,

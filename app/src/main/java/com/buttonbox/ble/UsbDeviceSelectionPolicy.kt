@@ -1,7 +1,13 @@
 package com.buttonbox.ble
 
 /**
- * Pure USB-host selection policy for the supported Mega144H7 transport.
+ * Pure USB-host selection policy for the common STM32 rusEFI/EpicEFI transport.
+ *
+ * Firmware evidence shows that STM32 targets using the shared serial-over-USB layer expose the
+ * same 0483:5740 device identity and CDC ACM shape. USB enumeration therefore identifies a safe
+ * firmware transport candidate, not a specific ECU model. The actual ECU/board identity comes
+ * later from the firmware-generated TunerStudio signature and must still exactly match the
+ * imported INI before output decoding or tuning authority is established.
  *
  * Android descriptor objects are adapted into these immutable values by [UsbEcuManager]. Keeping
  * policy free of Android classes allows deterministic JVM coverage for unrelated hub devices,
@@ -43,8 +49,9 @@ internal data class UsbDeviceDescriptor(
 )
 
 internal object UsbDeviceSelectionPolicy {
-    const val MEGA144H7_VENDOR_ID: Int = 0x0483
-    const val MEGA144H7_PRODUCT_ID: Int = 0x5740
+    /** Shared STM32 firmware USB serial identity from serial_over_usb/usbcfg.cpp. */
+    const val STM32_FIRMWARE_VENDOR_ID: Int = 0x0483
+    const val STM32_FIRMWARE_PRODUCT_ID: Int = 0x5740
 
     const val CLASS_COMMUNICATIONS: Int = 2
     const val CLASS_CDC_DATA: Int = 10
@@ -54,12 +61,13 @@ internal object UsbDeviceSelectionPolicy {
     const val TRANSFER_BULK: Int = 2
 
     /**
-     * Accept only the physically validated Mega144H7 USB identity with its CDC control/data shape.
+     * Accept only the firmware's known STM32 USB identity with its CDC control/data shape.
      * The composite device may also expose a mass-storage interface; that interface alone never
-     * makes a device eligible.
+     * makes a device eligible. Passing this gate does not identify a board and grants no tuning
+     * authority: the runtime firmware signature and matching INI do that later.
      */
     fun isSupportedDevice(device: UsbDeviceDescriptor): Boolean {
-        if (device.vendorId != MEGA144H7_VENDOR_ID || device.productId != MEGA144H7_PRODUCT_ID) {
+        if (device.vendorId != STM32_FIRMWARE_VENDOR_ID || device.productId != STM32_FIRMWARE_PRODUCT_ID) {
             return false
         }
         val hasCommunicationsInterface = device.interfaces.any {
@@ -71,7 +79,7 @@ internal object UsbDeviceSelectionPolicy {
         return hasCommunicationsInterface && hasCdcDataPipe
     }
 
-    /** Deterministic selection when more than one supported ECU is present. */
+    /** Deterministic selection when more than one firmware transport candidate is present. */
     fun selectCandidate(devices: Collection<UsbDeviceDescriptor>): UsbDeviceDescriptor? =
         devices.asSequence()
             .filter(::isSupportedDevice)
@@ -84,7 +92,8 @@ internal object UsbDeviceSelectionPolicy {
 
     /**
      * Unrelated attachment must never advance generation or disturb a valid streaming session.
-     * A second supported device is also left alone while the current ECU session is healthy.
+     * A second firmware transport candidate is also left alone while the current ECU session is
+     * healthy.
      */
     fun shouldStartDiscoveryForAttach(
         attached: UsbDeviceDescriptor,
@@ -99,10 +108,13 @@ internal object UsbDeviceSelectionPolicy {
     fun shouldInvalidateForDetach(detachedDeviceId: Int, currentDeviceId: Int?): Boolean =
         currentDeviceId != null && detachedDeviceId == currentDeviceId
 
+    /** Parse the board/family identity actually reported by the firmware, if recognizable. */
+    fun firmwareIdentity(signature: String): EcuFirmwareIdentity? = EcuFirmwareIdentity.parse(signature)
+
     /** A profile with no expected signature is not sufficient authority to begin streaming. */
     fun exactSignatureMatches(expected: String, actual: String): Boolean {
-        val normalizedExpected = expected.trim()
-        val normalizedActual = actual.trim()
+        val normalizedExpected = expected.trim().trimEnd('\u0000').trim()
+        val normalizedActual = actual.trim().trimEnd('\u0000').trim()
         return normalizedExpected.isNotEmpty() && normalizedActual == normalizedExpected
     }
 }
