@@ -3,21 +3,29 @@ package com.buttonbox.ble
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 /**
  * Regression coverage for the firmware/profile-driven ECU compatibility boundary.
  *
- * The committed Mega144H7 file is a real generated mainController.ini and is parsed end-to-end.
- * The other cases intentionally use reduced generated-style fixtures carrying only fields that were
- * verified during the 2026-09-22 cross-board generated-definition audit. They prove that differing
- * signatures and memory geometry remain imported profile data; they are not substitutes for keeping
- * full generated INIs as fixtures when those artifacts are available.
+ * The private repository carries a real generated Mega144H7 mainController.ini fixture and parses it
+ * end-to-end. That generated vehicle/ECU artifact is deliberately excluded from the curated public
+ * source export, so the real-fixture test is skipped when the file is unavailable here. The other
+ * cases intentionally use reduced generated-style fixtures carrying only fields verified during the
+ * 2026-09-22 cross-board generated-definition audit. They prove that differing signatures and memory
+ * geometry remain imported profile data; they are not substitutes for full generated INIs when real
+ * artifacts are available.
  */
 class GeneratedIniCrossBoardCompatibilityTest {
     @Test
     fun realMega144H7GeneratedIniParsesWithItsDistinctGeometry() {
-        val ini = readRepositoryFixture("reference/ecu/mainController-msf1000000548.ini")
+        val fixture = findRepositoryFixture("reference/ecu/mainController-msf1000000548.ini")
+        assumeTrue(
+            "Private real Mega144H7 generated-INI fixture is intentionally unavailable in the curated public source",
+            fixture != null
+        )
+        val ini = requireNotNull(fixture).readText()
         val profile = UsbTunerStudioProfileParser.parse(ini, "mainController-msf1000000548.ini")
 
         assertEquals("rusEFI master.2026.05.24.MEGA144H7.3684405155", profile.signature)
@@ -122,14 +130,12 @@ class GeneratedIniCrossBoardCompatibilityTest {
         """.trimIndent()
     }
 
-    private fun readRepositoryFixture(relativePath: String): String {
+    private fun findRepositoryFixture(relativePath: String): File? {
         val start = File(System.getProperty("user.dir")).absoluteFile
-        val fixture = generateSequence(start) { it.parentFile }
+        return generateSequence(start) { it.parentFile }
             .take(8)
             .map { root -> File(root, relativePath) }
             .firstOrNull { candidate -> candidate.isFile }
-            ?: error("Repository fixture not found from ${start.path}: $relativePath")
-        return fixture.readText()
     }
 
     private data class GeneratedProfileContract(
