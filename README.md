@@ -1,5 +1,7 @@
 # Epic DashTune
 
+> **New public compatibility release available:** [Epic DashTune 0.12.5 RC1](https://github.com/PJawZK/Epic-DashTune_Public/releases/tag/v0.12.5-rc.1) is now available for download and public testing. The APK and SHA-256 file are available on the [Releases page](https://github.com/PJawZK/Epic-DashTune_Public/releases).
+
 Epic DashTune is the legacy Android dashboard, diagnostics, logging, playback, and native Tuner application that preceded **EpicEFI – EpicHub**.
 
 Active long-term product development has moved to EpicHub. This repository remains public as a useful compatibility-test vehicle for EpicEFI/rusEFI Android connectivity, generated `mainController.ini` profiles, TunerStudio signatures, live telemetry, and the existing guarded native tuning path.
@@ -14,7 +16,7 @@ Current source/application state:
 - Android package retained for continuity: `com.buttonbox.ble.jz`
 - Private integrated application-source baseline: `9de5f4129cddc75692b39b84069f658c6a92ce61`
 - Private merged-main Android quality: `#1988 / 36041788337` — PASS
-- Public release target: `v0.12.5-rc.1`
+- Public release: [`v0.12.5-rc.1`](https://github.com/PJawZK/Epic-DashTune_Public/releases/tag/v0.12.5-rc.1)
 
 The release is intentionally a **pre-release compatibility test build**, not a claim of broad hardware qualification.
 
